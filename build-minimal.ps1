@@ -5,7 +5,7 @@
 #
 # Prerequisites (MSYS2 MINGW64):
 #   pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make `
-#             mingw-w64-x86_64-pkg-config diffutils
+#             mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
 #
 # Usage:
 #   .\build-minimal.ps1 configure          # Step 1
@@ -151,7 +151,7 @@ function Find-Msys2Bash {
     throw @"
 MSYS2 bash.exe not found. Install MSYS2 from https://www.msys2.org/
 Then install build tools:
-  pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-pkg-config diffutils
+  pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
 "@
 }
 

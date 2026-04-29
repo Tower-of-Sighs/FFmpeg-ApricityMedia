@@ -38,6 +38,7 @@ Starting from `--disable-everything`, only the following are enabled:
 
 ```
 pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
+          mingw-w64-x86_64-nasm \
           mingw-w64-x86_64-pkg-config diffutils
 ```
 

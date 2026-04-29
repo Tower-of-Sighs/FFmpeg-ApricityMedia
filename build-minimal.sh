@@ -8,7 +8,7 @@
 #   Linux:   gcc make pkg-config libssl-dev zlib1g-dev nasm
 #   macOS:   brew install make pkg-config
 #   Android: ANDROID_NDK_HOME must be set
-#   Windows: run inside MSYS2 MINGW64 (bash --login, MSYSTEM=MINGW64)
+#   Windows: MSYS2 MINGW64 (pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils)
 #
 # Usage:
 #   ./build-minimal.sh configure        # Step 1 — detect platform

@@ -5,7 +5,7 @@
 # JNI wrapper separately against JDK 17 / 21 / 25.
 #
 # Platforms:
-#   windows-x64   MSYS2 + MinGW-w64 via pwsh calling MSYS2 bash (build-minimal.sh)
+#   windows-x64   MSYS2 + MinGW-w64 (msys2 shell)       (build-minimal.sh)
 #   macos-arm64   Apple clang + SecureTransport (build-minimal.sh)
 #   linux-x64     gcc + OpenSSL           (build-minimal.sh)
 #   android-arm64 NDK cross-compile       (build-minimal.sh)
@@ -99,6 +99,7 @@ jobs:
             mingw-w64-x86_64-gcc-libs
             mingw-w64-x86_64-crt-git
             mingw-w64-x86_64-make
+            mingw-w64-x86_64-nasm
             mingw-w64-x86_64-pkg-config
             diffutils
 
