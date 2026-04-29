@@ -15,7 +15,7 @@ name: Build FFmpeg + JNI
 
 on:
   push:
-    branches: [master, 'release/*']
+    branches: [master, 'release/*', 'feat/*', 'feature/*']
   pull_request:
     branches: [master]
 
@@ -48,7 +48,7 @@ jobs:
           done
 
       - name: Shell syntax check
-        run: bash -n build-minimal.sh && echo "build-minimal.sh: syntax OK"
+        run: 'bash -n build-minimal.sh && echo "build-minimal.sh: syntax OK"'
 
   # ---- Step 2: build matrix ----
   build:
