@@ -218,13 +218,14 @@ build_jni() {
     local platform="${1:-$(detect_platform)}"
     echo "=== Building JNI wrapper for $platform ==="
 
-    local cc="" lib_ext="" jni_os="" extra_libs="" extra_ldflags=""
+    local cc="" lib_ext="" jni_os="" extra_libs="" extra_ldflags="" jni_basename=""
 
     case "$platform" in
         windows)
             cc="gcc"
             lib_ext="dll"
             jni_os="win32"
+            jni_basename="apricitymedia-jni"
             extra_libs="-lole32 -lpsapi -lbcrypt -static-libgcc -static-libstdc++"
             extra_ldflags="-Wl,--enable-runtime-pseudo-reloc"
             ;;
@@ -232,6 +233,7 @@ build_jni() {
             cc="gcc"
             lib_ext="so"
             jni_os="linux"
+            jni_basename="libapricitymedia-jni"
             extra_libs="-lpthread -ldl"
             extra_ldflags=""
             ;;
@@ -239,6 +241,7 @@ build_jni() {
             cc="clang"
             lib_ext="dylib"
             jni_os="darwin"
+            jni_basename="libapricitymedia-jni"
             extra_libs=""
             extra_ldflags=""
             ;;
@@ -247,6 +250,7 @@ build_jni() {
             cc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
             lib_ext="so"
             jni_os="linux"
+            jni_basename="libapricitymedia-jni"
             extra_libs="-llog"
             extra_ldflags=""
             ;;
@@ -271,7 +275,6 @@ build_jni() {
 
     mkdir -p "$BUILD_DIR/dist/bin"
 
-    local jni_basename="apricitymedia-jni"
     local out="$BUILD_DIR/dist/bin/$jni_basename.$lib_ext"
 
     $cc -shared -o "$out" \

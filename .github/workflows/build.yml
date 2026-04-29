@@ -137,7 +137,7 @@ jobs:
 
       - name: Build FFmpeg + JNI (Windows, Java 21)
         if: matrix.platform == 'windows-x64'
-        shell: 'msys2 { msystem: MINGW64 }'
+        shell: msys2
         run: |
           cd "${{ github.workspace }}"
           chmod +x build-minimal.sh
@@ -165,7 +165,7 @@ jobs:
 
       - name: Build JNI (Windows, Java 17)
         if: matrix.platform == 'windows-x64'
-        shell: 'msys2 { msystem: MINGW64 }'
+        shell: msys2
         run: |
           cd "${{ github.workspace }}"
           ./build-minimal.sh build-jni
@@ -199,7 +199,7 @@ jobs:
       - name: Build JNI (Windows, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform == 'windows-x64'
         continue-on-error: true
-        shell: 'msys2 { msystem: MINGW64 }'
+        shell: msys2
         run: |
           cd "${{ github.workspace }}"
           ./build-minimal.sh build-jni
