@@ -35,10 +35,10 @@ JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 
 # ---- Platform detection ----
 detect_platform() {
-    if [ -n "${ANDROID_NDK_HOME:-}" ]; then
-        echo "android"
-    elif [ "$(uname)" = "Darwin" ]; then
+    if [ "$(uname)" = "Darwin" ]; then
         echo "macos"
+    elif [ -n "${ANDROID_NDK_HOME:-}" ]; then
+        echo "android"
     else
         echo "linux"
     fi

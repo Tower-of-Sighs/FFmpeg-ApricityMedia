@@ -164,14 +164,20 @@ function Invoke-Msys2Script($body) {
     $bashPath = Find-Msys2Bash
 
     # Use --login so MSYS2 profile loads mingw64/bin into PATH.
-    # Do NOT set MSYS2_PATH_TYPE — the default behavior appends
-    # /mingw64/bin to PATH, which is where gcc lives.
+    # Must set MSYSTEM=MINGW64 so /etc/profile sources the MINGW64
+    # profile fragment, which adds /mingw64/bin to PATH (where gcc is).
     $fullCmd = $body -replace "`r`n", " " -replace "`n", " " -replace "`r", " "
     $fullCmd = $fullCmd.Trim()
 
     Write-Host "  $fullCmd" -ForegroundColor Gray
 
+    # Explicitly set MSYSTEM so MINGW64 profile loads
+    $prevMsys = $env:MSYSTEM
+    $env:MSYSTEM = 'MINGW64'
+
     & $bashPath --login -c $fullCmd
+
+    $env:MSYSTEM = $prevMsys
     if ($LASTEXITCODE -ne 0) {
         throw "MSYS2 script failed (exit $LASTEXITCODE). Check output above."
     }
