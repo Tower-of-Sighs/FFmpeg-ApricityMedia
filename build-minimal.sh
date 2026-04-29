@@ -8,7 +8,7 @@
 #   Linux:   gcc make pkg-config libssl-dev zlib1g-dev nasm
 #   macOS:   brew install make pkg-config
 #   Android: ANDROID_NDK_HOME must be set
-#   Windows: MSYS2 MINGW64 (pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils)
+#   Windows: MSYS2 MINGW64 (pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils)
 #
 # Usage:
 #   ./build-minimal.sh configure        # Step 1 — detect platform
@@ -202,7 +202,7 @@ build_ffmpeg() {
     echo "=== Building FFmpeg ==="
 
     if [ ! -f "$BUILD_DIR/Makefile" ]; then
-        echo "Makefile not found — run configure first." >&2
+        echo "Makefile not found - run configure first." >&2
         return 1
     fi
 
@@ -211,10 +211,20 @@ build_ffmpeg() {
         make_cmd="make"
     elif command -v mingw32-make &>/dev/null; then
         # MSYS2 MinGW packages ship GNU make as mingw32-make.exe (even for 64-bit).
+        # NOTE: mingw32-make is a native binary and doesn't understand MSYS-style
+        # absolute paths like "/d/a/...". FFmpeg's out-of-tree build Makefile
+        # uses an `include /<drive>/.../Makefile` directive, so mingw32-make will
+        # fail to locate it. Prefer the regular MSYS2 `make` package.
+        if [ -f "$BUILD_DIR/Makefile" ] && head -n 1 "$BUILD_DIR/Makefile" | grep -Eq '^include[[:space:]]+/' ; then
+            echo "Found mingw32-make but FFmpeg generated an MSYS-path Makefile include." >&2
+            echo "Install the MSYS2 'make' package so the 'make' command is available:" >&2
+            echo "  pacman -S make" >&2
+            return 127
+        fi
         make_cmd="mingw32-make"
     else
         echo "Neither 'make' nor 'mingw32-make' found in PATH." >&2
-        echo "On MSYS2 MINGW64 install: mingw-w64-x86_64-make (provides mingw32-make) or msys/make." >&2
+        echo "On MSYS2 MINGW64 install: pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm ..." >&2
         return 127
     fi
 
@@ -269,7 +279,7 @@ build_jni() {
     esac
 
     if [ -z "${JAVA_HOME:-}" ]; then
-        echo "JAVA_HOME is not set — cannot build JNI." >&2
+        echo "JAVA_HOME is not set - cannot build JNI." >&2
         return 1
     fi
 
@@ -281,7 +291,7 @@ build_jni() {
     local fflib="$BUILD_DIR/dist/lib"
 
     if [ ! -d "$ffinc/libavcodec" ]; then
-        echo "FFmpeg headers not found at $ffinc — run 'build-ffmpeg' first." >&2
+        echo "FFmpeg headers not found at $ffinc - run 'build-ffmpeg' first." >&2
         return 1
     fi
 

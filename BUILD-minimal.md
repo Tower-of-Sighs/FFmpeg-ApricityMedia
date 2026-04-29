@@ -37,7 +37,7 @@ Starting from `--disable-everything`, only the following are enabled:
 ## Build prerequisites (Windows / MSYS2 MINGW64)
 
 ```
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
+pacman -S make mingw-w64-x86_64-gcc \
           mingw-w64-x86_64-nasm \
           mingw-w64-x86_64-pkg-config diffutils
 ```

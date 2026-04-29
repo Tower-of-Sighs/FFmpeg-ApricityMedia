@@ -95,10 +95,10 @@ jobs:
           update: false
           cache: true
           install: >-
+            make
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-gcc-libs
             mingw-w64-x86_64-crt-git
-            mingw-w64-x86_64-make
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-pkg-config
             diffutils

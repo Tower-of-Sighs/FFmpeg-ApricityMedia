@@ -4,8 +4,8 @@
 # build-minimal.ps1 — Build minimal FFmpeg 8.1 + JNI wrapper DLL
 #
 # Prerequisites (MSYS2 MINGW64):
-#   pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make `
-#             mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
+#   pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm `
+#             mingw-w64-x86_64-pkg-config diffutils
 #
 # Usage:
 #   .\build-minimal.ps1 configure          # Step 1
@@ -151,7 +151,7 @@ function Find-Msys2Bash {
     throw @"
 MSYS2 bash.exe not found. Install MSYS2 from https://www.msys2.org/
 Then install build tools:
-  pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
+  pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
 "@
 }
 
@@ -227,9 +227,10 @@ function Invoke-BuildFfmpeg {
     if (-not $jobs -or $jobs -le 0) { $jobs = 4 }
 
     $build = Convert-ToMsysPath $BuildDir
-    # MSYS2 MinGW often provides GNU make as mingw32-make.exe (even on 64-bit).
-    # Prefer `make` if present, else fall back to `mingw32-make`.
-    $script = "cd '$build' && MAKE=make; command -v make >/dev/null 2>&1 || MAKE=mingw32-make; `$MAKE -j$jobs && `$MAKE install"
+    # FFmpeg's out-of-tree Makefile uses MSYS-style absolute paths (e.g. /d/...),
+    # which native mingw32-make does not understand. Require the MSYS2 `make`
+    # package so the `make` command is available.
+    $script = "cd '$build' && command -v make >/dev/null 2>&1 || { echo 'make not found (MSYS2). Install: pacman -S make' >&2; exit 127; } && make -j$jobs && make install"
     Invoke-Msys2Script $script
 
     $libDir = Join-Path $BuildDir "dist/lib"
