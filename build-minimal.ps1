@@ -1,7 +1,7 @@
 #requires -Version 7.0
 
 # ================================================================
-# build-minimal.ps1 — Build minimal FFmpeg 8.1 + JNI wrapper DLL
+# build-minimal.ps1 - Build minimal FFmpeg 8.1 + JNI wrapper DLL
 #
 # Prerequisites (MSYS2 MINGW64):
 #   pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm `
@@ -116,7 +116,7 @@ function Write-Step($msg) {
 }
 
 function Convert-ToMsysPath($winPath) {
-    # "C:\foo\bar" → "/c/foo/bar"
+    # "C:\foo\bar" -> "/c/foo/bar"
     if (-not $winPath) { return $winPath }
     $result = $winPath -replace '\\', '/'
     if ($result -match '^([a-zA-Z]):(.*)') {

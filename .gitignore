@@ -53,3 +53,5 @@
 !/.github/
 
 /build-minimal/
+/dist-mc/
+/libs/

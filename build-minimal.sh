@@ -1,6 +1,6 @@
 #!/bin/bash
 # ================================================================
-# build-minimal.sh — Build minimal FFmpeg 8.1 + JNI wrapper
+# build-minimal.sh - Build minimal FFmpeg 8.1 + JNI wrapper
 #
 # Supports: linux, macos, android (cross-compile), windows (MSYS2)
 #
@@ -11,16 +11,16 @@
 #   Windows: MSYS2 MINGW64 (pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils)
 #
 # Usage:
-#   ./build-minimal.sh configure        # Step 1 — detect platform
+#   ./build-minimal.sh configure        # Step 1 - detect platform
 #   ./build-minimal.sh build-ffmpeg     # Step 2
 #   JAVA_HOME=/path/to/jdk ./build-minimal.sh build-jni  # Step 3
 #   ./build-minimal.sh all              # All in one shot
 #
 # Platform auto-detection:
-#   MSYSTEM is set           → windows (MSYS2 MINGW64)
-#   uname = Darwin           → macos
-#   ANDROID_NDK_HOME set     → android (cross-compile aarch64)
-#   otherwise                → linux
+#   MSYSTEM is set           -> windows (MSYS2 MINGW64)
+#   uname = Darwin           -> macos
+#   ANDROID_NDK_HOME set     -> android (cross-compile aarch64)
+#   otherwise                -> linux
 # ================================================================
 
 set -euo pipefail

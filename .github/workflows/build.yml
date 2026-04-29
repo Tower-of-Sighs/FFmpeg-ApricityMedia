@@ -1,8 +1,9 @@
 # ================================================================
-# Build FFmpeg + JNI — 4 platforms × 3 Java versions (17 / 21 / 25)
+# Build FFmpeg runtime - 4 platforms x 3 MC targets
 #
-# Each platform builds FFmpeg shared libs once, then compiles the
-# JNI wrapper separately against JDK 17 / 21 / 25.
+# Each platform builds FFmpeg shared libs once, then compiles the JNI wrapper
+# separately against JDK 17 / 21. Java 25 (MC 26.1) uses the FFM API and ships
+# only the FFmpeg shared libs (no JNI wrapper).
 #
 # Platforms:
 #   windows-x64   MSYS2 + MinGW-w64 (msys2 shell)       (build-minimal.sh)
@@ -11,7 +12,7 @@
 #   android-arm64 NDK cross-compile       (build-minimal.sh)
 # ================================================================
 
-name: Build FFmpeg + JNI
+name: Build FFmpeg runtime
 
 on:
   push:
@@ -43,7 +44,7 @@ jobs:
 
       - name: Check source files exist
         run: |
-          for f in jni/jni_ffmpeg.c jni/ApricityMediaNative.java build-minimal.ps1 build-minimal.sh; do
+          for f in jni/jni_ffmpeg.c jni/ApricityMediaNative.java build-minimal.ps1 build-minimal.sh package-dist.ps1; do
             test -f "$f" && echo "  OK  $f" || { echo "  MISSING  $f"; exit 1; }
           done
 
@@ -130,7 +131,7 @@ jobs:
           sudo apt-get install -y -qq make pkg-config diffutils nasm
 
       # ===============================================================
-      #  Build FFmpeg shared libs + JNI (Java 21 — primary LTS)
+      #  Build FFmpeg shared libs + JNI (Java 21 - primary LTS)
       # ===============================================================
 
       - uses: actions/setup-java@v4
@@ -157,7 +158,7 @@ jobs:
              build-minimal/dist/bin/${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}
 
       # ===============================================================
-      #  JNI (Java 17 — older LTS)
+      #  JNI (Java 17 - older LTS)
       # ===============================================================
 
       - uses: actions/setup-java@v4
@@ -183,51 +184,43 @@ jobs:
              build-minimal/dist/bin/${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
 
       # ===============================================================
-      #  JNI (Java 25 — latest)
-      #  Java 25 must be available as temurin or oracle-ea;
-      #  if not available the build step is skipped, existing
-      #  (Java 17 + 21) artifacts are still uploaded.
+      #  MC 26.1 (Java 25) uses FFM API
+      #  No JNI wrapper is built for this target; we package FFmpeg libs only.
       # ===============================================================
 
-      - id: java25
-        name: Setup Java 25
-        continue-on-error: true
-        uses: actions/setup-java@v4
-        with:
-          # Try temurin first; oracle-ea fallback for bleeding edge
-          distribution: temurin
-          java-version: '25'
+      # ===============================================================
+      #  Package dist-mc zips (per platform)
+      # ===============================================================
 
-      - name: Build JNI (Windows, Java 25)
-        if: steps.java25.outcome == 'success' && matrix.platform == 'windows-x64'
-        continue-on-error: true
-        shell: msys2 {0}
+      - name: Create platform artifact zip
+        shell: pwsh
         run: |
-          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
-          bash build-minimal.sh build-jni
-          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
-             build-minimal/dist/bin/${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
+          New-Item -ItemType Directory -Force -Path libs | Out-Null
+          Compress-Archive -Path "build-minimal/dist/*" -DestinationPath "libs/ffmpeg-jni-${{ matrix.platform }}.zip" -Force
 
-      - name: Build JNI (POSIX, Java 25)
-        if: steps.java25.outcome == 'success' && matrix.platform != 'windows-x64'
-        continue-on-error: true
-        shell: bash
+      - name: Package MC zips
+        shell: pwsh
         run: |
-          ./build-minimal.sh build-jni
-          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
-             build-minimal/dist/bin/${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
+          ./package-dist.ps1 -ArtifactsDir libs -OutputDir dist-mc -OnlyPlatforms "${{ matrix.platform }}"
 
-      # ===============================================================
-      #  Upload artifacts (run even if Java 25 steps were skipped)
-      # ===============================================================
-
-      - name: Upload build artifacts
+      - name: Upload dist-mc (per platform)
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-jni-${{ matrix.platform }}
-          path: |
-            build-minimal/dist/include/
-            build-minimal/dist/lib/
-            build-minimal/dist/bin/
+          name: dist-mc-${{ matrix.platform }}
+          path: dist-mc/
           if-no-files-found: error
           compression-level: 6
+
+  # ---- Step 3: merge dist-mc across platforms ----
+  dist-mc:
+    name: dist-mc
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Merge dist-mc artifacts
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: dist-mc
+          pattern: dist-mc-*
+          delete-merged: true
