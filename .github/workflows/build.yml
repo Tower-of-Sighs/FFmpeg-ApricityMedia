@@ -5,7 +5,7 @@
 # JNI wrapper separately against JDK 17 / 21 / 25.
 #
 # Platforms:
-#   windows-x64   MSYS2 + MinGW-w64 via build-minimal.sh (shell: msys2)
+#   windows-x64   MSYS2 + MinGW-w64 via pwsh calling MSYS2 bash (build-minimal.sh)
 #   macos-arm64   Apple clang + SecureTransport (build-minimal.sh)
 #   linux-x64     gcc + OpenSSL           (build-minimal.sh)
 #   android-arm64 NDK cross-compile       (build-minimal.sh)
@@ -137,13 +137,14 @@ jobs:
 
       - name: Build FFmpeg + JNI (Windows, Java 21)
         if: matrix.platform == 'windows-x64'
-        shell: msys2
+        shell: pwsh
         run: |
-          cd "${{ github.workspace }}"
-          chmod +x build-minimal.sh
-          ./build-minimal.sh all
-          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
-             build-minimal/dist/bin/${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          $bash = "C:\msys64\usr\bin\bash.exe"
+          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh all"
+          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
+                    -NewName "${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}"
 
       - name: Build FFmpeg + JNI (POSIX, Java 21)
         if: matrix.platform != 'windows-x64'
@@ -165,12 +166,14 @@ jobs:
 
       - name: Build JNI (Windows, Java 17)
         if: matrix.platform == 'windows-x64'
-        shell: msys2
+        shell: pwsh
         run: |
-          cd "${{ github.workspace }}"
-          ./build-minimal.sh build-jni
-          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
-             build-minimal/dist/bin/${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          $bash = "C:\msys64\usr\bin\bash.exe"
+          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh build-jni"
+          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
+                    -NewName "${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}"
 
       - name: Build JNI (POSIX, Java 17)
         if: matrix.platform != 'windows-x64'
@@ -199,12 +202,14 @@ jobs:
       - name: Build JNI (Windows, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform == 'windows-x64'
         continue-on-error: true
-        shell: msys2
+        shell: pwsh
         run: |
-          cd "${{ github.workspace }}"
-          ./build-minimal.sh build-jni
-          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
-             build-minimal/dist/bin/${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
+          $env:MSYSTEM = 'MINGW64'
+          $env:CHERE_INVOKING = '1'
+          $bash = "C:\msys64\usr\bin\bash.exe"
+          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh build-jni"
+          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
+                    -NewName "${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}"
 
       - name: Build JNI (POSIX, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform != 'windows-x64'
