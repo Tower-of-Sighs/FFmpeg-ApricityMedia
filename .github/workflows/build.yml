@@ -139,14 +139,12 @@ jobs:
 
       - name: Build FFmpeg + JNI (Windows, Java 21)
         if: matrix.platform == 'windows-x64'
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          $env:MSYSTEM = 'MINGW64'
-          $env:CHERE_INVOKING = '1'
-          $bash = "C:\msys64\usr\bin\bash.exe"
-          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh all"
-          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
-                    -NewName "${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          bash build-minimal.sh all
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}
 
       - name: Build FFmpeg + JNI (POSIX, Java 21)
         if: matrix.platform != 'windows-x64'
@@ -168,14 +166,12 @@ jobs:
 
       - name: Build JNI (Windows, Java 17)
         if: matrix.platform == 'windows-x64'
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          $env:MSYSTEM = 'MINGW64'
-          $env:CHERE_INVOKING = '1'
-          $bash = "C:\msys64\usr\bin\bash.exe"
-          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh build-jni"
-          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
-                    -NewName "${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          bash build-minimal.sh build-jni
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
 
       - name: Build JNI (POSIX, Java 17)
         if: matrix.platform != 'windows-x64'
@@ -204,14 +200,12 @@ jobs:
       - name: Build JNI (Windows, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform == 'windows-x64'
         continue-on-error: true
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          $env:MSYSTEM = 'MINGW64'
-          $env:CHERE_INVOKING = '1'
-          $bash = "C:\msys64\usr\bin\bash.exe"
-          & $bash --login -c "cd '${{ github.workspace }}' && ./build-minimal.sh build-jni"
-          Move-Item -Path "build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }}" `
-                    -NewName "${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}"
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          bash build-minimal.sh build-jni
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
 
       - name: Build JNI (POSIX, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform != 'windows-x64'
