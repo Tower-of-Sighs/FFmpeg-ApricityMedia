@@ -5,7 +5,7 @@
 # JNI wrapper separately against JDK 17 / 21 / 25.
 #
 # Platforms:
-#   windows-x64   MSYS2 + MinGW-w64 (existing build-minimal.ps1)
+#   windows-x64   MSYS2 + MinGW-w64 via build-minimal.sh (shell: msys2)
 #   macos-arm64   Apple clang + SecureTransport (build-minimal.sh)
 #   linux-x64     gcc + OpenSSL           (build-minimal.sh)
 #   android-arm64 NDK cross-compile       (build-minimal.sh)
@@ -137,11 +137,13 @@ jobs:
 
       - name: Build FFmpeg + JNI (Windows, Java 21)
         if: matrix.platform == 'windows-x64'
-        shell: pwsh
+        shell: 'msys2 { msystem: MINGW64 }'
         run: |
-          .\build-minimal.ps1 all
-          Rename-Item -Path build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} `
-                      -NewName ${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}
+          cd "${{ github.workspace }}"
+          chmod +x build-minimal.sh
+          ./build-minimal.sh all
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java21.${{ matrix.jni_ext }}
 
       - name: Build FFmpeg + JNI (POSIX, Java 21)
         if: matrix.platform != 'windows-x64'
@@ -163,11 +165,12 @@ jobs:
 
       - name: Build JNI (Windows, Java 17)
         if: matrix.platform == 'windows-x64'
-        shell: pwsh
+        shell: 'msys2 { msystem: MINGW64 }'
         run: |
-          .\build-minimal.ps1 build-jni
-          Rename-Item -Path build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} `
-                      -NewName ${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
+          cd "${{ github.workspace }}"
+          ./build-minimal.sh build-jni
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
 
       - name: Build JNI (POSIX, Java 17)
         if: matrix.platform != 'windows-x64'
@@ -196,11 +199,12 @@ jobs:
       - name: Build JNI (Windows, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform == 'windows-x64'
         continue-on-error: true
-        shell: pwsh
+        shell: 'msys2 { msystem: MINGW64 }'
         run: |
-          .\build-minimal.ps1 build-jni
-          Rename-Item -Path build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} `
-                      -NewName ${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
+          cd "${{ github.workspace }}"
+          ./build-minimal.sh build-jni
+          mv build-minimal/dist/bin/${{ matrix.jni_lib }}.${{ matrix.jni_ext }} \
+             build-minimal/dist/bin/${{ matrix.jni_lib }}-java25.${{ matrix.jni_ext }}
 
       - name: Build JNI (POSIX, Java 25)
         if: steps.java25.outcome == 'success' && matrix.platform != 'windows-x64'

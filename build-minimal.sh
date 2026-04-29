@@ -1,27 +1,26 @@
 #!/bin/bash
 # ================================================================
-# build-minimal.sh — Build minimal FFmpeg 8.1 + JNI wrapper (.so/.dylib)
+# build-minimal.sh — Build minimal FFmpeg 8.1 + JNI wrapper
+#
+# Supports: linux, macos, android (cross-compile), windows (MSYS2)
 #
 # Prerequisites (platform-dependent):
 #   Linux:   gcc make pkg-config libssl-dev zlib1g-dev nasm
 #   macOS:   brew install make pkg-config
 #   Android: ANDROID_NDK_HOME must be set
+#   Windows: run inside MSYS2 MINGW64 (bash --login, MSYSTEM=MINGW64)
 #
 # Usage:
 #   ./build-minimal.sh configure        # Step 1 — detect platform
 #   ./build-minimal.sh build-ffmpeg     # Step 2
-#   JAVA_HOME=/path/to/jdk-21 \
-#   ./build-minimal.sh build-jni        # Step 3
-#
-#   JAVA_HOME=/path/to/jdk-17 \
-#   ./build-minimal.sh build-jni        # JNI with different JDK
-#
+#   JAVA_HOME=/path/to/jdk ./build-minimal.sh build-jni  # Step 3
 #   ./build-minimal.sh all              # All in one shot
 #
 # Platform auto-detection:
-#   ANDROID_NDK_HOME set → android (cross-compile aarch64)
-#   uname = Darwin        → macos  (Apple clang + SecureTransport)
-#   otherwise             → linux  (gcc + OpenSSL)
+#   MSYSTEM is set           → windows (MSYS2 MINGW64)
+#   uname = Darwin           → macos
+#   ANDROID_NDK_HOME set     → android (cross-compile aarch64)
+#   otherwise                → linux
 # ================================================================
 
 set -euo pipefail
@@ -35,12 +34,23 @@ JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 
 # ---- Platform detection ----
 detect_platform() {
-    if [ "$(uname)" = "Darwin" ]; then
+    if [ -n "${MSYSTEM:-}" ]; then
+        echo "windows"
+    elif [ "$(uname)" = "Darwin" ]; then
         echo "macos"
     elif [ -n "${ANDROID_NDK_HOME:-}" ]; then
         echo "android"
     else
         echo "linux"
+    fi
+}
+
+# Convert JAVA_HOME to a POSIX path (on Windows via cygpath, pass-through elsewhere)
+resolve_javahome() {
+    if command -v cygpath &>/dev/null; then
+        cygpath -u "$JAVA_HOME"
+    else
+        echo "$JAVA_HOME"
     fi
 }
 
@@ -127,21 +137,30 @@ configure() {
     local extra=()
 
     case "$platform" in
+        windows)
+            extra+=(
+                --enable-schannel
+                --enable-protocol=file
+                --enable-protocol=http
+                --enable-protocol=https
+                --enable-protocol=tcp
+            )
+            ;;
         linux)
             extra+=(
                 --enable-openssl
+                --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https
-                --enable-protocol=file
                 --enable-protocol=tcp
             )
             ;;
         macos)
             extra+=(
                 --enable-securetransport
+                --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https
-                --enable-protocol=file
                 --enable-protocol=tcp
             )
             ;;
@@ -159,7 +178,6 @@ configure() {
                 --strip="$tc/bin/llvm-strip"
                 --sysroot="$tc/sysroot"
                 --extra-ldflags="-Wl,--gc-sections"
-                # No TLS libs available when cross-compiling
                 --enable-protocol=file
                 --enable-protocol=tcp
             )
@@ -200,20 +218,29 @@ build_jni() {
     local platform="${1:-$(detect_platform)}"
     echo "=== Building JNI wrapper for $platform ==="
 
-    local cc="" lib_ext="" jni_os="" extra_libs=""
+    local cc="" lib_ext="" jni_os="" extra_libs="" extra_ldflags=""
 
     case "$platform" in
+        windows)
+            cc="gcc"
+            lib_ext="dll"
+            jni_os="win32"
+            extra_libs="-lole32 -lpsapi -lbcrypt -static-libgcc -static-libstdc++"
+            extra_ldflags="-Wl,--enable-runtime-pseudo-reloc"
+            ;;
         linux)
             cc="gcc"
             lib_ext="so"
             jni_os="linux"
             extra_libs="-lpthread -ldl"
+            extra_ldflags=""
             ;;
         macos)
             cc="clang"
             lib_ext="dylib"
             jni_os="darwin"
             extra_libs=""
+            extra_ldflags=""
             ;;
         android)
             local ndk="${ANDROID_NDK_HOME:?ANDROID_NDK_HOME not set}"
@@ -221,6 +248,7 @@ build_jni() {
             lib_ext="so"
             jni_os="linux"
             extra_libs="-llog"
+            extra_ldflags=""
             ;;
     esac
 
@@ -228,6 +256,10 @@ build_jni() {
         echo "JAVA_HOME is not set — cannot build JNI." >&2
         return 1
     fi
+
+    # On Windows, JAVA_HOME is a Windows path (C:\...); convert for MSYS2 gcc
+    local jh
+    jh="$(resolve_javahome)"
 
     local ffinc="$BUILD_DIR/dist/include"
     local fflib="$BUILD_DIR/dist/lib"
@@ -239,16 +271,17 @@ build_jni() {
 
     mkdir -p "$BUILD_DIR/dist/bin"
 
-    local out="$BUILD_DIR/dist/bin/libapricitymedia-jni.$lib_ext"
+    local jni_basename="apricitymedia-jni"
+    local out="$BUILD_DIR/dist/bin/$jni_basename.$lib_ext"
 
     $cc -shared -o "$out" \
-        -I"$JAVA_HOME/include" \
-        -I"$JAVA_HOME/include/$jni_os" \
+        -I"$jh/include" \
+        -I"$jh/include/$jni_os" \
         -I"$ffinc" \
         -L"$fflib" \
         "$JNI_DIR/jni_ffmpeg.c" \
         -lavformat -lavcodec -lavutil -lswresample -lswscale \
-        $extra_libs -lm -O2 -s
+        $extra_libs -lm -O2 -s $extra_ldflags
 
     echo "JNI library built: $out"
 }
@@ -278,7 +311,7 @@ case "$cmd" in
     build-jni)     build_jni "$platform" ;;
     all)           all "$platform" ;;
     *)
-        echo "Usage: $0 {configure|build-ffmpeg|build-jni|all} [linux|macos|android]" >&2
+        echo "Usage: $0 {configure|build-ffmpeg|build-jni|all} [linux|macos|android|windows]" >&2
         exit 1
         ;;
 esac
