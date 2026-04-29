@@ -227,7 +227,9 @@ function Invoke-BuildFfmpeg {
     if (-not $jobs -or $jobs -le 0) { $jobs = 4 }
 
     $build = Convert-ToMsysPath $BuildDir
-    $script = "cd '$build' && make -j$jobs && make install"
+    # MSYS2 MinGW often provides GNU make as mingw32-make.exe (even on 64-bit).
+    # Prefer `make` if present, else fall back to `mingw32-make`.
+    $script = "cd '$build' && MAKE=make; command -v make >/dev/null 2>&1 || MAKE=mingw32-make; `$MAKE -j$jobs && `$MAKE install"
     Invoke-Msys2Script $script
 
     $libDir = Join-Path $BuildDir "dist/lib"

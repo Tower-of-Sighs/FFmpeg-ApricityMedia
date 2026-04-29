@@ -206,9 +206,21 @@ build_ffmpeg() {
         return 1
     fi
 
+    local make_cmd=""
+    if command -v make &>/dev/null; then
+        make_cmd="make"
+    elif command -v mingw32-make &>/dev/null; then
+        # MSYS2 MinGW packages ship GNU make as mingw32-make.exe (even for 64-bit).
+        make_cmd="mingw32-make"
+    else
+        echo "Neither 'make' nor 'mingw32-make' found in PATH." >&2
+        echo "On MSYS2 MINGW64 install: mingw-w64-x86_64-make (provides mingw32-make) or msys/make." >&2
+        return 127
+    fi
+
     cd "$BUILD_DIR"
-    make -j"$JOBS"
-    make install
+    "$make_cmd" -j"$JOBS"
+    "$make_cmd" install
     cd "$SCRIPT_DIR"
 
     echo "FFmpeg build complete. Libraries in: $BUILD_DIR/dist/lib"
