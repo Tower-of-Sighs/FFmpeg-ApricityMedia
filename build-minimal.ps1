@@ -42,20 +42,24 @@ $ConfigureFlags = @(
 
 # TLS for HTTPS on Windows (uses SChannel, no external libs)
     '--enable-schannel'
+    '--enable-network'
     '--disable-pthreads'
     '--enable-w32threads'
     # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
-    '--extra-ldflags=-static-libgcc -static-libstdc++'
+    '--extra-ldflags="-static-libgcc -static-libstdc++"'
     # Prevent FFmpeg from auto-detecting and dynamically linking
     # MSYS2 system libs (iconv/zlib/bz2/lzma). Not needed for decode-only use.
     '--disable-iconv'
     '--disable-zlib'
     '--disable-bzlib'
     '--disable-lzma'
+    '--enable-libdav1d'
 
 # --- Video decoders ---
     '--enable-decoder=h264'
     '--enable-decoder=hevc'
+    '--enable-decoder=av1'
+    '--enable-decoder=libdav1d'
     '--enable-decoder=vp8'
     '--enable-decoder=vp9'
     '--enable-decoder=mpeg4'
@@ -86,6 +90,9 @@ $ConfigureFlags = @(
     '--enable-protocol=http'
     '--enable-protocol=https'
     '--enable-protocol=tcp'
+    '--enable-protocol=tls'
+    '--enable-protocol=crypto'
+    '--enable-protocol=httpproxy'
 
 # --- Bitstream filters (needed for TS/HLS demuxing) ---
     '--enable-bsf=h264_mp4toannexb'
@@ -332,3 +339,6 @@ switch ($command) {
         exit 1
     }
 }
+
+
+

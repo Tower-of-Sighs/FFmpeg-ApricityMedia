@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -49,6 +50,22 @@
 static int is_remote(const char *path) {
     if (!path) return 0;
     return strstr(path, "://") != NULL;
+}
+
+static char g_last_error[1024] = "";
+
+static void clear_last_error(void) {
+    g_last_error[0] = '\0';
+}
+
+static void set_last_error_from_code(const char *op, const char *path, int err) {
+    char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+    av_strerror(err, errbuf, sizeof(errbuf));
+    snprintf(g_last_error, sizeof(g_last_error),
+             "%s failed (%d): %s, path=%s",
+             op ? op : "native op", err, errbuf, path ? path : "<null>");
+    g_last_error[sizeof(g_last_error) - 1] = '\0';
+    av_log(NULL, AV_LOG_ERROR, "%s\n", g_last_error);
 }
 
 static void dict_set_int(AVDictionary **d, const char *key, long v) {
@@ -131,6 +148,18 @@ static int64_t resolve_pts(const AVFrame *f, AVRational tb, int64_t *fb) {
 static int resolve_dur(const AVFrame *f, AVRational tb, int def) {
     if (f->duration > 0) return (int)fmax(1, round(f->duration * rat_dbl(tb) * 1000.0));
     return def;
+}
+
+static enum AVPixelFormat choose_software_pix_fmt(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+    (void)ctx;
+    if (!pix_fmts) return AV_PIX_FMT_NONE;
+    for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+        if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            return *p;
+        }
+    }
+    return pix_fmts[0];
 }
 
 /* ================================================================
@@ -254,7 +283,13 @@ static int vd_open(VideoDecoder *d, const char *path,
     AVStream *st = d->fmt_ctx->streams[d->stream_index];
     d->time_base = st->time_base;
 
-    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+    const AVCodec *codec = NULL;
+    if (st->codecpar->codec_id == AV_CODEC_ID_AV1) {
+        codec = avcodec_find_decoder_by_name("libdav1d");
+    }
+    if (!codec) {
+        codec = avcodec_find_decoder(st->codecpar->codec_id);
+    }
     if (!codec) return AVERROR_DECODER_NOT_FOUND;
 
     d->codec_ctx = avcodec_alloc_context3(codec);
@@ -266,6 +301,7 @@ static int vd_open(VideoDecoder *d, const char *path,
     /* Error tolerance for live streams / imperfect sources */
     d->codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
     d->codec_ctx->err_recognition |= AV_EF_IGNORE_ERR;
+    d->codec_ctx->get_format = choose_software_pix_fmt;
 
     /* Multi-threaded frame decoding — critical for 4K60 */
     d->codec_ctx->thread_count = 0;  /* auto = one thread per logical core */
@@ -340,12 +376,11 @@ static int vd_decode_into_pool(VideoDecoder *d) {
                 int send_ret = avcodec_send_packet(d->codec_ctx, d->pkt);
                 if (send_ret == 0) break;
                 if (send_ret == AVERROR(EAGAIN)) {
-                    /* Decoder buffer full — drain one frame, return it,
-                       then retry send on next call. */
+                    /* Decoder buffer full: drain one frame if available, then keep decoding. */
                     av_packet_unref(d->pkt);
                     int ret = avcodec_receive_frame(d->codec_ctx, d->decoded_frame);
                     if (ret == 0) goto produce;
-                    return -1;
+                    continue;
                 }
                 break;  /* Other error, drop packet */
             }
@@ -354,8 +389,9 @@ static int vd_decode_into_pool(VideoDecoder *d) {
             continue;
         }
 
-        if (read_ret == AVERROR(EAGAIN))
-            return -1;  /* Temporary unavailability, caller retries */
+        if (read_ret == AVERROR(EAGAIN)) {
+            continue;  /* Temporary unavailability */
+        }
 
         /* Real read error → EOF */
         d->eof = 1;
@@ -591,6 +627,14 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_init
     avformat_network_init();
 }
 
+JNIEXPORT jstring JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_lastError
+    (JNIEnv *env, jclass clazz)
+{
+    (void)clazz;
+    const char *msg = g_last_error[0] ? g_last_error : "";
+    return (*env)->NewStringUTF(env, msg);
+}
+
 /* ================================================================
  *  JNI — video
  * ================================================================ */
@@ -605,6 +649,7 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
      jint tmo, jint buf_kb, jboolean recon)
 {
     (void)clazz;
+    clear_last_error();
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) return 0;
 
@@ -613,9 +658,13 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
 
     int ret = vd_open(d, path, (int)tw, (int)th, (double)max_fps,
                        (int)tmo, (int)buf_kb, (int)recon);
+    if (ret < 0) {
+        set_last_error_from_code("videoOpen", path, ret);
+        (*env)->ReleaseStringUTFChars(env, jpath, path);
+        vd_free(d);
+        return 0;
+    }
     (*env)->ReleaseStringUTFChars(env, jpath, path);
-
-    if (ret < 0) { vd_free(d); return 0; }
     return (jlong)(intptr_t)d;
 }
 
@@ -749,6 +798,7 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audi
      jstring jpath, jint tmo, jint buf_kb, jboolean recon)
 {
     (void)clazz;
+    clear_last_error();
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) return 0;
 
@@ -756,9 +806,13 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audi
     if (!d) { (*env)->ReleaseStringUTFChars(env, jpath, path); return 0; }
 
     int ret = ad_open(d, path, (int)tmo, (int)buf_kb, (int)recon);
+    if (ret < 0) {
+        set_last_error_from_code("audioOpen", path, ret);
+        (*env)->ReleaseStringUTFChars(env, jpath, path);
+        ad_free(d);
+        return 0;
+    }
     (*env)->ReleaseStringUTFChars(env, jpath, path);
-
-    if (ret < 0) { ad_free(d); return 0; }
     return (jlong)(intptr_t)d;
 }
 
@@ -932,3 +986,9 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
     (void)env; (void)clazz;
     ad_free((AudioDecoder *)(intptr_t)handle);
 }
+
+
+
+
+
+

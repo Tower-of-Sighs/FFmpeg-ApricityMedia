@@ -31,6 +31,7 @@ FFMPEG_SRC="$SCRIPT_DIR"
 JNI_DIR="$SCRIPT_DIR/jni"
 
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+WINDOWS_PRIVATE_WINPTHREAD="apwinpthread_01.dll"
 
 # ---- Platform detection ----
 detect_platform() {
@@ -71,6 +72,8 @@ BASE_FLAGS=(
     # --- Video decoders ---
     --enable-decoder=h264
     --enable-decoder=hevc
+    --enable-decoder=av1
+    --enable-decoder=libdav1d
     --enable-decoder=vp8
     --enable-decoder=vp9
     --enable-decoder=mpeg4
@@ -103,6 +106,7 @@ BASE_FLAGS=(
     # --- Parsers ---
     --enable-parser=h264
     --enable-parser=hevc
+    --enable-parser=av1
     --enable-parser=vp8
     --enable-parser=vp9
     --enable-parser=aac
@@ -125,13 +129,23 @@ configure() {
         windows)
             extra+=(
                 --enable-schannel
+                --enable-network
                 --disable-pthreads
                 --enable-w32threads
+                --disable-vaapi
+                --disable-d3d11va
+                --disable-d3d12va
+                --disable-dxva2
+                --disable-mediafoundation
+                --enable-libdav1d
                 --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https
                 --enable-protocol=tcp
-                --extra-ldflags="-static-libgcc -static-libstdc++"
+                --enable-protocol=tls
+                --enable-protocol=crypto
+                --enable-protocol=httpproxy
+                --extra-ldflags="-static-libgcc -static-libstdc++ -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
                 --disable-iconv
                 --disable-zlib
                 --disable-bzlib
@@ -141,10 +155,14 @@ configure() {
         linux)
             extra+=(
                 --enable-openssl
+                --enable-network
                 --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https
                 --enable-protocol=tcp
+                --enable-protocol=tls
+                --enable-protocol=crypto
+                --enable-protocol=httpproxy
                 --extra-ldflags="-static-libgcc -static-libstdc++"
                 --disable-iconv
                 --disable-zlib
@@ -159,6 +177,9 @@ configure() {
                 --enable-protocol=http
                 --enable-protocol=https
                 --enable-protocol=tcp
+                --enable-protocol=tls
+                --enable-protocol=crypto
+                --enable-protocol=httpproxy
             )
             ;;
         android)
@@ -177,6 +198,9 @@ configure() {
                 --extra-ldflags="-Wl,--gc-sections"
                 --enable-protocol=file
                 --enable-protocol=tcp
+                --enable-protocol=tls
+                --enable-protocol=crypto
+                --enable-protocol=httpproxy
             )
             ;;
     esac
@@ -230,7 +254,61 @@ build_ffmpeg() {
     "$make_cmd" install
     cd "$SCRIPT_DIR"
 
+    patch_windows_runtime "$(detect_platform)"
+
     echo "FFmpeg build complete. Libraries in: $BUILD_DIR/dist/lib"
+}
+
+patch_windows_runtime() {
+    local platform="${1:-$(detect_platform)}"
+    if [ "$platform" != "windows" ]; then
+        return 0
+    fi
+
+    local bin="$BUILD_DIR/dist/bin"
+    local avutil="$bin/avutil-60.dll"
+    if [ ! -f "$avutil" ]; then
+        return 0
+    fi
+
+    local src=""
+    for candidate in \
+        "/mingw64/bin/libwinpthread-1.dll" \
+        "/ucrt64/bin/libwinpthread-1.dll" \
+        "/clang64/bin/libwinpthread-1.dll"
+    do
+        if [ -f "$candidate" ]; then
+            src="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$src" ]; then
+        echo "WARN: libwinpthread-1.dll not found; skipping private runtime patch." >&2
+        return 0
+    fi
+
+    cp -f "$src" "$bin/$WINDOWS_PRIVATE_WINPTHREAD"
+
+    local dav1d=""
+    for candidate in /mingw64/bin/libdav1d-*.dll /ucrt64/bin/libdav1d-*.dll /clang64/bin/libdav1d-*.dll; do
+        if [ -f "$candidate" ]; then
+            dav1d="$candidate"
+            cp -f "$candidate" "$bin/$(basename "$candidate")"
+            break
+        fi
+    done
+    if [ -z "$dav1d" ]; then
+        echo "WARN: libdav1d-*.dll not found; AV1 decoding may be unavailable." >&2
+    fi
+
+    perl -0777 -i -pe 's/libwinpthread-1\.dll/apwinpthread_01.dll/g' "$avutil"
+
+    if objdump -p "$avutil" | grep -q "DLL Name: $WINDOWS_PRIVATE_WINPTHREAD"; then
+        echo "Windows runtime patched: avutil-60.dll -> $WINDOWS_PRIVATE_WINPTHREAD"
+    else
+        echo "WARN: failed to patch avutil-60.dll import name" >&2
+    fi
 }
 
 build_jni() {
@@ -245,7 +323,7 @@ build_jni() {
             lib_ext="dll"
             jni_os="win32"
             jni_basename="apricitymedia-jni"
-            extra_libs="-lole32 -lpsapi -lbcrypt -static-libgcc -static-libstdc++"
+            extra_libs="-Wl,-Bstatic -lwinpthread -Wl,-Bdynamic -lole32 -lpsapi -lbcrypt -static-libgcc -static-libstdc++"
             extra_ldflags="-Wl,--enable-runtime-pseudo-reloc"
             ;;
         linux)
@@ -337,3 +415,8 @@ case "$cmd" in
         exit 1
         ;;
 esac
+
+
+
+
+
