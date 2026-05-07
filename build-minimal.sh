@@ -130,6 +130,10 @@ configure() {
                 --enable-protocol=https
                 --enable-protocol=tcp
                 --extra-ldflags="-static-libgcc -static-libstdc++"
+                --disable-iconv
+                --disable-zlib
+                --disable-bzlib
+                --disable-lzma
             )
             ;;
         linux)
@@ -140,6 +144,10 @@ configure() {
                 --enable-protocol=https
                 --enable-protocol=tcp
                 --extra-ldflags="-static-libgcc -static-libstdc++"
+                --disable-iconv
+                --disable-zlib
+                --disable-bzlib
+                --disable-lzma
             )
             ;;
         macos)

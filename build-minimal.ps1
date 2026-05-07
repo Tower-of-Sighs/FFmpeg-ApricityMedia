@@ -44,6 +44,12 @@ $ConfigureFlags = @(
     '--enable-schannel'
     # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
     '--extra-ldflags=-static-libgcc -static-libstdc++'
+    # Prevent FFmpeg from auto-detecting and dynamically linking
+    # MSYS2 system libs (iconv/zlib/bz2/lzma). Not needed for decode-only use.
+    '--disable-iconv'
+    '--disable-zlib'
+    '--disable-bzlib'
+    '--disable-lzma'
 
 # --- Video decoders ---
     '--enable-decoder=h264'
