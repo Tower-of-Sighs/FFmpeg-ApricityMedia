@@ -5,7 +5,7 @@
 #
 # Prerequisites (MSYS2 MINGW64):
 #   pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm `
-#             mingw-w64-x86_64-pkg-config mingw-w64-x86_64-zlib diffutils
+#             mingw-w64-x86_64-pkg-config diffutils
 #
 # Usage:
 #   .\build-minimal.ps1 configure          # Step 1
@@ -45,8 +45,9 @@ $ConfigureFlags = @(
     # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
     '--extra-ldflags=-static-libgcc -static-libstdc++'
     # Prevent FFmpeg from auto-detecting and dynamically linking
-    # MSYS2 system libs (iconv/bz2/lzma). Not needed for decode-only use.
+    # MSYS2 system libs (iconv/zlib/bz2/lzma). Not needed for decode-only use.
     '--disable-iconv'
+    '--disable-zlib'
     '--disable-bzlib'
     '--disable-lzma'
 
@@ -143,7 +144,7 @@ function Find-Msys2Bash {
     throw @"
 MSYS2 bash.exe not found. Install MSYS2 from https://www.msys2.org/
 Then install build tools:
-  pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config mingw-w64-x86_64-zlib diffutils
+  pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils
 "@
 }
 

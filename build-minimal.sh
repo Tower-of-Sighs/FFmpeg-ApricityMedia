@@ -8,7 +8,7 @@
 #   Linux:   gcc make pkg-config libssl-dev zlib1g-dev nasm
 #   macOS:   brew install make pkg-config
 #   Android: ANDROID_NDK_HOME must be set
-#   Windows: MSYS2 MINGW64 (pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config mingw-w64-x86_64-zlib diffutils)
+#   Windows: MSYS2 MINGW64 (pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkg-config diffutils)
 #
 # Usage:
 #   ./build-minimal.sh configure        # Step 1 - detect platform
@@ -131,6 +131,7 @@ configure() {
                 --enable-protocol=tcp
                 --extra-ldflags="-static-libgcc -static-libstdc++"
                 --disable-iconv
+                --disable-zlib
                 --disable-bzlib
                 --disable-lzma
             )
@@ -144,6 +145,7 @@ configure() {
                 --enable-protocol=tcp
                 --extra-ldflags="-static-libgcc -static-libstdc++"
                 --disable-iconv
+                --disable-zlib
                 --disable-bzlib
                 --disable-lzma
             )
