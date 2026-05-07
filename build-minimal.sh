@@ -125,6 +125,8 @@ configure() {
         windows)
             extra+=(
                 --enable-schannel
+                --disable-pthreads
+                --enable-w32threads
                 --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https

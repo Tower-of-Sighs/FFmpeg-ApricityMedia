@@ -42,6 +42,8 @@ $ConfigureFlags = @(
 
 # TLS for HTTPS on Windows (uses SChannel, no external libs)
     '--enable-schannel'
+    '--disable-pthreads'
+    '--enable-w32threads'
     # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
     '--extra-ldflags=-static-libgcc -static-libstdc++'
     # Prevent FFmpeg from auto-detecting and dynamically linking
