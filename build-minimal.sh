@@ -73,9 +73,7 @@ BASE_FLAGS=(
     --enable-decoder=hevc
     --enable-decoder=vp8
     --enable-decoder=vp9
-    --enable-decoder=av1
     --enable-decoder=mpeg4
-    --enable-decoder=mpeg2video
 
     # --- Audio decoders ---
     --enable-decoder=aac
@@ -84,15 +82,7 @@ BASE_FLAGS=(
     --enable-decoder=vorbis
     --enable-decoder=opus
     --enable-decoder=flac
-    --enable-decoder=alac
     --enable-decoder=pcm_s16le
-    --enable-decoder=pcm_s24le
-    --enable-decoder=pcm_f32le
-    --enable-decoder=pcm_s32le
-    --enable-decoder=ac3
-    --enable-decoder=ac3_fixed
-    --enable-decoder=eac3
-    --enable-decoder=wmav2
 
     # --- Demuxers ---
     --enable-demuxer=mov
@@ -102,13 +92,9 @@ BASE_FLAGS=(
     --enable-demuxer=flac
     --enable-demuxer=wav
     --enable-demuxer=aac
-    --enable-demuxer=ac3
-    --enable-demuxer=eac3
     --enable-demuxer=mpegts
     --enable-demuxer=hls
     --enable-demuxer=flv
-    --enable-demuxer=aiff
-    --enable-demuxer=asf
 
     # --- Bitstream filters ---
     --enable-bsf=h264_mp4toannexb
@@ -122,7 +108,6 @@ BASE_FLAGS=(
     --enable-parser=aac
     --enable-parser=opus
     --enable-parser=vorbis
-    --enable-parser=flac
     --enable-parser=mpegaudio
 )
 

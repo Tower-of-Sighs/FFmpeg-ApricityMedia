@@ -1,20 +1,15 @@
 /**
- * jni_ffmpeg.c — Direct JNI bridge to minimal FFmpeg (8.1 API).
+ * jni_ffmpeg.c — JNI bridge to minimal FFmpeg (8.1 API).
  *
- * Replaces JavaCPP-based decoders with raw JNI for:
+ * Replaces JavaCPP-based decoders with direct JNI for:
  *   - Video decoding (libavcodec + libavformat + libswscale → RGBA)
  *   - Audio decoding (libavcodec + libavformat + libswresample → S16LE 48 kHz stereo)
  *
- * Build (cross-compile with mingw-w64):
- *   x86_64-w64-mingw32-gcc -shared -o apricitymedia-jni.dll \
- *       -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/win32" \
- *       -I/path/to/ffmpeg/build/include \
- *       -L/path/to/ffmpeg/build/lib \
- *       jni_ffmpeg.c -lavformat -lavcodec -lavutil -lswresample -lswscale \
- *       -lole32 -lpsapi -lbcrypt -lm \
- *       -Wl,--enable-runtime-pseudo-reloc \
- *       -static-libgcc -static-libstdc++ \
- *       -O2 -s
+ * Improvements over the original:
+ *   - Frame pooling for video (zero malloc per frame after init)
+ *   - av_find_best_stream for proper stream selection
+ *   - Error-tolerance flags (SHOW_ALL, IGNORE_ERR) for live streams
+ *   - Proper send/receive retry loops with EAGAIN handling
  */
 
 #include <jni.h>
@@ -45,69 +40,8 @@
 #define AUDIO_OUT_SAMPLE_RATE  48000
 #define AUDIO_OUT_SAMPLE_FMT   AV_SAMPLE_FMT_S16
 #define AUDIO_OUT_CHANNELS     2
-
-/* ================================================================
- *  Internal structs — opaque handles passed to Java as jlong
- * ================================================================ */
-
-/* ---------- Video ---------- */
-
-typedef struct {
-    AVFormatContext  *fmt_ctx;
-    AVCodecContext   *codec_ctx;
-    int               stream_index;
-    AVRational        time_base;
-
-    int               src_width;
-    int               src_height;
-    int               out_width;
-    int               out_height;
-    int               default_duration_ms;
-    int64_t           min_frame_interval_ms;
-
-    AVPacket         *pkt;
-    AVFrame          *decoded_frame;
-    struct SwsContext *sws_ctx;
-
-    uint8_t          *rgba_buffer;      /* reusable intermediate */
-    int               rgba_buffer_size;
-
-    int               eof;
-    int64_t           fallback_pts_ms;
-    int64_t           last_emitted_pts_ms;
-} VideoDecoder;
-
-/* A single decoded RGBA frame, heap-allocated and returned to Java */
-typedef struct {
-    uint8_t *rgba_data;
-    int      width;
-    int      height;
-    int64_t  pts_ms;
-    int      duration_ms;
-    int      capacity;   /* width * height * 4 */
-} VideoFrame;
-
-/* ---------- Audio ---------- */
-
-typedef struct {
-    AVFormatContext   *fmt_ctx;
-    AVCodecContext    *codec_ctx;
-    int                stream_index;
-
-    AVPacket          *pkt;
-    AVFrame           *frame;
-    struct SwrContext *swr;
-    AVChannelLayout    out_layout;
-    AVChannelLayout    in_layout;
-
-    int                eof;
-    int                drain_started;
-
-    uint8_t           *out_buffer;
-    int                out_buffer_capacity;
-    int                pending_bytes;
-    int                pending_pos;
-} AudioDecoder;
+#define VIDEO_FRAME_POOL_SIZE  8
+#define MAX_DECODE_ATTEMPTS    32
 
 /* ================================================================
  *  Internal helpers
@@ -156,7 +90,10 @@ static int open_input(AVFormatContext **fmt_ctx, const char *path,
     return ret;
 }
 
-static int find_stream_type(AVFormatContext *fmt_ctx, enum AVMediaType type) {
+static int find_best_stream(AVFormatContext *fmt_ctx, enum AVMediaType type) {
+    int idx = av_find_best_stream(fmt_ctx, type, -1, -1, NULL, 0);
+    if (idx >= 0) return idx;
+    /* Fallback: pick first stream matching type */
     for (unsigned i = 0; i < fmt_ctx->nb_streams; i++) {
         AVStream *st = fmt_ctx->streams[i];
         if (st && st->codecpar && st->codecpar->codec_type == type)
@@ -198,8 +135,96 @@ static int resolve_dur(const AVFrame *f, AVRational tb, int def) {
 }
 
 /* ================================================================
- *  VideoDecoder
+ *  VideoDecoder — with frame pool
  * ================================================================ */
+
+typedef struct {
+    uint8_t *rgba_data;    /* width * height * 4, pre-allocated into pool */
+    int      width;
+    int      height;
+    int64_t  pts_ms;
+    int      duration_ms;
+    int      capacity;
+} VideoFrame;
+
+typedef struct {
+    AVFormatContext  *fmt_ctx;
+    AVCodecContext   *codec_ctx;
+    int               stream_index;
+    AVRational        time_base;
+
+    int               src_width;
+    int               src_height;
+    int               out_width;
+    int               out_height;
+    int               default_duration_ms;
+    int64_t           min_frame_interval_ms;
+
+    AVPacket         *pkt;
+    AVFrame          *decoded_frame;
+    struct SwsContext *sws_ctx;
+
+    /* Reusable scratch buffer for sws_scale output (sws writes here,
+       then we copy into the pooled frame). */
+    uint8_t          *rgba_scratch;
+    int               rgba_scratch_size;
+
+    /* Frame pool */
+    int               pool_size;
+    VideoFrame       *pool;           /* array[pool_size] */
+    int              *free_stack;     /* stack of free indices */
+    int               free_count;
+
+    int               eof;
+    int64_t           fallback_pts_ms;
+    int64_t           last_emitted_pts_ms;
+} VideoDecoder;
+
+/* --- Pool helpers --- */
+
+static int pool_pop(VideoDecoder *d) {
+    if (d->free_count <= 0) return -1;
+    return d->free_stack[--d->free_count];
+}
+
+static void pool_push(VideoDecoder *d, int idx) {
+    if (idx < 0 || idx >= d->pool_size) return;
+    d->free_stack[d->free_count++] = idx;
+}
+
+static int pool_init(VideoDecoder *d, int count, int w, int h) {
+    int cap = av_image_get_buffer_size(AV_PIX_FMT_RGBA, w, h, 1);
+    if (cap <= 0) return AVERROR(EINVAL);
+
+    d->pool_size = count;
+    d->pool = (VideoFrame *)av_mallocz((size_t)count * sizeof(VideoFrame));
+    d->free_stack = (int *)av_malloc((size_t)count * sizeof(int));
+    if (!d->pool || !d->free_stack) return AVERROR(ENOMEM);
+
+    for (int i = 0; i < count; i++) {
+        d->pool[i].rgba_data = (uint8_t *)av_malloc(cap);
+        if (!d->pool[i].rgba_data) return AVERROR(ENOMEM);
+        d->pool[i].capacity = cap;
+        d->free_stack[i] = i;
+    }
+    d->free_count = count;
+    return 0;
+}
+
+static void pool_free(VideoDecoder *d) {
+    if (!d->pool) return;
+    for (int i = 0; i < d->pool_size; i++) {
+        if (d->pool[i].rgba_data) av_free(d->pool[i].rgba_data);
+    }
+    av_free(d->pool);
+    av_free(d->free_stack);
+    d->pool = NULL;
+    d->free_stack = NULL;
+    d->pool_size = 0;
+    d->free_count = 0;
+}
+
+/* --- Decoder lifecycle --- */
 
 static VideoDecoder *vd_alloc(void) {
     return (VideoDecoder *)av_mallocz(sizeof(VideoDecoder));
@@ -207,12 +232,13 @@ static VideoDecoder *vd_alloc(void) {
 
 static void vd_free(VideoDecoder *d) {
     if (!d) return;
-    if (d->codec_ctx)    avcodec_free_context(&d->codec_ctx);
-    if (d->fmt_ctx)      avformat_close_input(&d->fmt_ctx);
-    if (d->sws_ctx)      sws_freeContext(d->sws_ctx);
+    if (d->codec_ctx)     avcodec_free_context(&d->codec_ctx);
+    if (d->fmt_ctx)       avformat_close_input(&d->fmt_ctx);
+    if (d->sws_ctx)       sws_freeContext(d->sws_ctx);
     if (d->decoded_frame) av_frame_free(&d->decoded_frame);
-    if (d->pkt)          av_packet_free(&d->pkt);
-    if (d->rgba_buffer)  av_free(d->rgba_buffer);
+    if (d->pkt)           av_packet_free(&d->pkt);
+    if (d->rgba_scratch)  av_free(d->rgba_scratch);
+    pool_free(d);
     av_free(d);
 }
 
@@ -229,7 +255,7 @@ static int vd_open(VideoDecoder *d, const char *path,
     ret = avformat_find_stream_info(d->fmt_ctx, NULL);
     if (ret < 0) return ret;
 
-    d->stream_index = find_stream_type(d->fmt_ctx, AVMEDIA_TYPE_VIDEO);
+    d->stream_index = find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_VIDEO);
     if (d->stream_index < 0) return AVERROR_STREAM_NOT_FOUND;
 
     AVStream *st = d->fmt_ctx->streams[d->stream_index];
@@ -243,6 +269,10 @@ static int vd_open(VideoDecoder *d, const char *path,
 
     ret = avcodec_parameters_to_context(d->codec_ctx, st->codecpar);
     if (ret < 0) return ret;
+
+    /* Error tolerance for live streams / imperfect sources */
+    d->codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
+    d->codec_ctx->err_recognition |= AV_EF_IGNORE_ERR;
 
     ret = avcodec_open2(d->codec_ctx, codec, NULL);
     if (ret < 0) return ret;
@@ -264,46 +294,81 @@ static int vd_open(VideoDecoder *d, const char *path,
                                  SWS_BILINEAR, NULL, NULL, NULL);
     if (!d->sws_ctx) return AVERROR(ENOMEM);
 
-    d->rgba_buffer_size = av_image_get_buffer_size(AV_PIX_FMT_RGBA,
+    d->rgba_scratch_size = av_image_get_buffer_size(AV_PIX_FMT_RGBA,
                                                      d->out_width, d->out_height, 1);
-    if (d->rgba_buffer_size <= 0) return AVERROR(EINVAL);
+    if (d->rgba_scratch_size <= 0) return AVERROR(EINVAL);
 
-    d->rgba_buffer = (uint8_t *)av_malloc(d->rgba_buffer_size);
-    if (!d->rgba_buffer) return AVERROR(ENOMEM);
+    d->rgba_scratch = (uint8_t *)av_malloc(d->rgba_scratch_size);
+    if (!d->rgba_scratch) return AVERROR(ENOMEM);
 
+    ret = pool_init(d, VIDEO_FRAME_POOL_SIZE, d->out_width, d->out_height);
+    if (ret < 0) return ret;
+
+    d->last_emitted_pts_ms = INT64_MIN;
     return 0;
 }
 
-/* Allocates and returns a new VideoFrame (caller frees with vf_free). */
-static VideoFrame *vd_read_frame(VideoDecoder *d) {
-    if (!d) return NULL;
+/* Decode one frame into a pooled VideoFrame slot. Returns pool index or -1.
+ *
+ * State machine: receive first (drain buffered frames), then read+send.
+ * This ensures we never block on av_read_frame while the decoder still has
+ * decoded frames waiting — critical for codecs that produce multiple frames
+ * per packet (B-frames) and for live streams. */
+static int vd_decode_into_pool(VideoDecoder *d) {
+    if (!d) return -1;
+
+    int drain_started = 0;
 
     for (;;) {
+        /* 1. Always drain buffered frames first */
+        int recv_ret = avcodec_receive_frame(d->codec_ctx, d->decoded_frame);
+        if (recv_ret == 0) goto produce;
+        if (recv_ret == AVERROR_EOF) return -1;
+
+        /* 2. If EOF, start drain (send NULL packet) then loop back to step 1 */
         if (d->eof) {
-            int ret = avcodec_receive_frame(d->codec_ctx, d->decoded_frame);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return NULL;
-            if (ret < 0) return NULL;
-            goto produce;
+            if (!drain_started) {
+                drain_started = 1;
+                avcodec_send_packet(d->codec_ctx, NULL);
+            } else {
+                return -1;  /* Drain complete, no more frames */
+            }
+            continue;
         }
 
-        while (av_read_frame(d->fmt_ctx, d->pkt) >= 0) {
+        /* 3. Read next packet from input */
+        int read_ret = av_read_frame(d->fmt_ctx, d->pkt);
+        if (read_ret >= 0) {
             if (d->pkt->stream_index != d->stream_index) {
                 av_packet_unref(d->pkt);
                 continue;
             }
-            int ret = avcodec_send_packet(d->codec_ctx, d->pkt);
-            av_packet_unref(d->pkt);
-            if (ret < 0) continue;
 
-            ret = avcodec_receive_frame(d->codec_ctx, d->decoded_frame);
-            if (ret == AVERROR(EAGAIN)) continue;
-            if (ret < 0) continue;
-            goto produce;
+            /* Send with EAGAIN retry */
+            for (;;) {
+                int send_ret = avcodec_send_packet(d->codec_ctx, d->pkt);
+                if (send_ret == 0) break;
+                if (send_ret == AVERROR(EAGAIN)) {
+                    /* Decoder buffer full — drain one frame, return it,
+                       then retry send on next call. */
+                    av_packet_unref(d->pkt);
+                    int ret = avcodec_receive_frame(d->codec_ctx, d->decoded_frame);
+                    if (ret == 0) goto produce;
+                    return -1;
+                }
+                break;  /* Other error, drop packet */
+            }
+            av_packet_unref(d->pkt);
+            /* Loop back to step 1 — receive the frame we just fed */
+            continue;
         }
 
+        if (read_ret == AVERROR(EAGAIN))
+            return -1;  /* Temporary unavailability, caller retries */
+
+        /* Real read error → EOF */
         d->eof = 1;
-        avcodec_send_packet(d->codec_ctx, NULL);
-        /* Retry drain */
+        /* Loop back to step 1, will enter drain */
     }
 
 produce:
@@ -314,33 +379,49 @@ produce:
         if (d->min_frame_interval_ms > 0 &&
             d->last_emitted_pts_ms != INT64_MIN &&
             (pts_ms - d->last_emitted_pts_ms) < d->min_frame_interval_ms)
-            return NULL;
+            return -1;
 
-        /* sws_scale */
-        uint8_t *dst[] = { d->rgba_buffer, NULL, NULL, NULL };
+        int idx = pool_pop(d);
+        if (idx < 0) return -1;  /* pool exhausted, caller must release frames first */
+
+        /* sws_scale → scratch, then copy into pooled frame */
+        uint8_t *dst[] = { d->rgba_scratch, NULL, NULL, NULL };
         int dst_stride[] = { d->out_width * 4, 0, 0, 0 };
-        int ret = sws_scale(d->sws_ctx,
-                            (const uint8_t *const *)d->decoded_frame->data,
-                            d->decoded_frame->linesize,
-                            0, d->src_height, dst, dst_stride);
-        if (ret <= 0) return NULL;
+        int scaled = sws_scale(d->sws_ctx,
+                               (const uint8_t *const *)d->decoded_frame->data,
+                               d->decoded_frame->linesize,
+                               0, d->src_height, dst, dst_stride);
+        if (scaled <= 0) {
+            pool_push(d, idx);
+            return -1;
+        }
 
-        VideoFrame *vf = (VideoFrame *)av_mallocz(sizeof(VideoFrame));
-        if (!vf) return NULL;
-
+        VideoFrame *vf = &d->pool[idx];
+        memcpy(vf->rgba_data, d->rgba_scratch, d->rgba_scratch_size);
         vf->width       = d->out_width;
         vf->height      = d->out_height;
         vf->pts_ms      = pts_ms;
         vf->duration_ms = dur_ms;
-        vf->capacity    = d->rgba_buffer_size;
 
-        vf->rgba_data = (uint8_t *)av_malloc(vf->capacity);
-        if (!vf->rgba_data) { av_free(vf); return NULL; }
-
-        memcpy(vf->rgba_data, d->rgba_buffer, vf->capacity);
         d->last_emitted_pts_ms = pts_ms;
-        return vf;
+        return idx;
     }
+}
+
+/* Returns pool index → opaque handle. Caller releases with vd_release_frame. */
+static int vd_read_frame_pool_idx(VideoDecoder *d) {
+    if (!d) return -1;
+    return vd_decode_into_pool(d);
+}
+
+static void vd_release_frame(VideoDecoder *d, int pool_idx) {
+    if (!d || pool_idx < 0 || pool_idx >= d->pool_size) return;
+    pool_push(d, pool_idx);
+}
+
+static VideoFrame *vd_get_frame(VideoDecoder *d, int pool_idx) {
+    if (!d || pool_idx < 0 || pool_idx >= d->pool_size) return NULL;
+    return &d->pool[pool_idx];
 }
 
 static void vd_rewind(VideoDecoder *d) {
@@ -352,15 +433,29 @@ static void vd_rewind(VideoDecoder *d) {
     avcodec_flush_buffers(d->codec_ctx);
 }
 
-static void vf_free(VideoFrame *vf) {
-    if (!vf) return;
-    if (vf->rgba_data) av_free(vf->rgba_data);
-    av_free(vf);
-}
-
 /* ================================================================
  *  AudioDecoder
  * ================================================================ */
+
+typedef struct {
+    AVFormatContext   *fmt_ctx;
+    AVCodecContext    *codec_ctx;
+    int                stream_index;
+
+    AVPacket          *pkt;
+    AVFrame           *frame;
+    struct SwrContext *swr;
+    AVChannelLayout    out_layout;
+    AVChannelLayout    in_layout;
+
+    int                eof;
+    int                drain_started;
+
+    uint8_t           *out_buffer;
+    int                out_buffer_capacity;
+    int                pending_bytes;
+    int                pending_pos;
+} AudioDecoder;
 
 static AudioDecoder *ad_alloc(void) {
     AudioDecoder *d = (AudioDecoder *)av_mallocz(sizeof(AudioDecoder));
@@ -393,7 +488,7 @@ static int ad_open(AudioDecoder *d, const char *path,
     ret = avformat_find_stream_info(d->fmt_ctx, NULL);
     if (ret < 0) return ret;
 
-    d->stream_index = find_stream_type(d->fmt_ctx, AVMEDIA_TYPE_AUDIO);
+    d->stream_index = find_best_stream(d->fmt_ctx, AVMEDIA_TYPE_AUDIO);
     if (d->stream_index < 0) return AVERROR_STREAM_NOT_FOUND;
 
     AVStream *st = d->fmt_ctx->streams[d->stream_index];
@@ -489,6 +584,7 @@ static void ad_rewind(AudioDecoder *d) {
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)vm; (void)reserved;
+    av_log_set_level(AV_LOG_ERROR);
     return JNI_VERSION_1_6;
 }
 
@@ -500,7 +596,6 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_init
     (JNIEnv *env, jclass clazz)
 {
     (void)env; (void)clazz;
-    av_log_set_level(AV_LOG_ERROR);
     avformat_network_init();
 }
 
@@ -535,6 +630,10 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * Method:    videoReadFrame
+ *
+ * Returns an opaque handle encoding both the decoder pointer and pool index.
+ * Bit layout: [decoder_ptr (48 bits)] | [pool_index (16 bits)]
+ * 0 on EOF or no frame available.
  */
 JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoReadFrame
     (JNIEnv *env, jclass clazz, jlong handle)
@@ -542,8 +641,12 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
     (void)env; (void)clazz;
     VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
     if (!d) return 0;
-    VideoFrame *vf = vd_read_frame(d);
-    return (jlong)(intptr_t)vf;
+
+    int idx = vd_read_frame_pool_idx(d);
+    if (idx < 0) return 0;
+
+    /* Pack: upper bits = decoder, lower 16 bits = pool index */
+    return (jlong)(((uintptr_t)d << 16) | (uint16_t)idx);
 }
 
 /*
@@ -555,7 +658,11 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     (JNIEnv *env, jclass clazz, jlong frame_handle, jlongArray jinfo)
 {
     (void)clazz;
-    VideoFrame *vf = (VideoFrame *)(intptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+
+    VideoFrame *vf = vd_get_frame(d, idx);
     if (!vf || !jinfo) return 0;
 
     jlong info[4];
@@ -576,7 +683,11 @@ JNIEXPORT jobject JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vi
     (JNIEnv *env, jclass clazz, jlong frame_handle)
 {
     (void)clazz;
-    VideoFrame *vf = (VideoFrame *)(intptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+
+    VideoFrame *vf = vd_get_frame(d, idx);
     if (!vf || !vf->rgba_data) return NULL;
     return (*env)->NewDirectByteBuffer(env, vf->rgba_data, (jlong)vf->capacity);
 }
@@ -589,7 +700,11 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     (JNIEnv *env, jclass clazz, jlong frame_handle)
 {
     (void)env; (void)clazz;
-    vf_free((VideoFrame *)(intptr_t)frame_handle);
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+
+    vd_release_frame(d, idx);
 }
 
 /*
@@ -670,7 +785,7 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
         return (jint)copy;
     }
 
-    /* Decode loop */
+    /* Decode loop with EAGAIN-aware send */
     for (;;) {
         if (d->eof) {
             if (!d->drain_started) {
@@ -693,16 +808,28 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
             return (jint)copy;
         }
 
-        while (av_read_frame(d->fmt_ctx, d->pkt) >= 0) {
+        int read_ret = av_read_frame(d->fmt_ctx, d->pkt);
+        if (read_ret >= 0) {
             if (d->pkt->stream_index != d->stream_index) {
                 av_packet_unref(d->pkt);
                 continue;
             }
-            int ret = avcodec_send_packet(d->codec_ctx, d->pkt);
+
+            /* Send with EAGAIN retry */
+            for (;;) {
+                int send_ret = avcodec_send_packet(d->codec_ctx, d->pkt);
+                if (send_ret == 0) break;
+                if (send_ret == AVERROR(EAGAIN)) {
+                    /* Drain one frame to make room, then retry */
+                    if (ad_receive(d) > 0) goto serve;
+                    continue;
+                }
+                break;  /* Other error, drop packet */
+            }
             av_packet_unref(d->pkt);
-            if (ret < 0) continue;
 
             if (ad_receive(d) > 0) {
+serve:
                 int avail = d->pending_bytes - d->pending_pos;
                 int copy  = (max_copy < avail) ? max_copy : avail;
                 if (copy <= 0) return 0;
@@ -716,10 +843,13 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
                 }
                 return (jint)copy;
             }
+            continue;
         }
 
+        if (read_ret == AVERROR(EAGAIN))
+            return 0;  /* Temporary unavailability */
+
         d->eof = 1;
-        /* loop to try drain */
     }
 }
 

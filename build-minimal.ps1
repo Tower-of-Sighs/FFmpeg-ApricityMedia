@@ -25,6 +25,7 @@ $JniDir     = Join-Path $ScriptRoot "jni"
 $BuildDir   = Join-Path $ScriptRoot "build-minimal"
 $FfmpegSrc  = $ScriptRoot
 
+# ---- configure flags ----
 $ConfigureFlags = @(
     '--arch=x86_64'
     '--enable-shared'
@@ -38,22 +39,27 @@ $ConfigureFlags = @(
     '--disable-runtime-cpudetect'
     '--disable-debug'
     '--enable-small'
+
+# TLS for HTTPS on Windows (uses SChannel, no external libs)
     '--enable-schannel'
 
-    # Video decoders
+# --- Video decoders ---
     '--enable-decoder=h264'
     '--enable-decoder=hevc'
+    '--enable-decoder=vp8'
     '--enable-decoder=vp9'
+    '--enable-decoder=mpeg4'
 
-    # Audio decoders
+# --- Audio decoders ---
     '--enable-decoder=aac'
+    '--enable-decoder=aac_fixed'
     '--enable-decoder=mp3float'
     '--enable-decoder=vorbis'
     '--enable-decoder=opus'
     '--enable-decoder=flac'
     '--enable-decoder=pcm_s16le'
 
-    # Demuxers
+# --- Demuxers ---
     '--enable-demuxer=mov'
     '--enable-demuxer=matroska'
     '--enable-demuxer=mp3'
@@ -65,19 +71,24 @@ $ConfigureFlags = @(
     '--enable-demuxer=hls'
     '--enable-demuxer=flv'
 
-    # Protocols
+# --- Protocols ---
     '--enable-protocol=file'
     '--enable-protocol=http'
     '--enable-protocol=https'
     '--enable-protocol=tcp'
 
-    # Parsers
+# --- Bitstream filters (needed for TS/HLS demuxing) ---
+    '--enable-bsf=h264_mp4toannexb'
+    '--enable-bsf=hevc_mp4toannexb'
+
+# --- Parsers ---
     '--enable-parser=h264'
     '--enable-parser=hevc'
+    '--enable-parser=vp8'
+    '--enable-parser=vp9'
     '--enable-parser=aac'
     '--enable-parser=opus'
     '--enable-parser=vorbis'
-    '--enable-parser=flac'
     '--enable-parser=mpegaudio'
 )
 
