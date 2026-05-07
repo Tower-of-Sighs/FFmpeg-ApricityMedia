@@ -25,7 +25,6 @@ $JniDir     = Join-Path $ScriptRoot "jni"
 $BuildDir   = Join-Path $ScriptRoot "build-minimal"
 $FfmpegSrc  = $ScriptRoot
 
-# ---- configure flags ----
 $ConfigureFlags = @(
     '--arch=x86_64'
     '--enable-shared'
@@ -39,37 +38,22 @@ $ConfigureFlags = @(
     '--disable-runtime-cpudetect'
     '--disable-debug'
     '--enable-small'
-
-    # TLS for HTTPS on Windows (uses SChannel, no external libs)
     '--enable-schannel'
 
-    # --- Video decoders ---
+    # Video decoders
     '--enable-decoder=h264'
     '--enable-decoder=hevc'
-    '--enable-decoder=vp8'
     '--enable-decoder=vp9'
-    '--enable-decoder=av1'
-    '--enable-decoder=mpeg4'
-    '--enable-decoder=mpeg2video'
 
-    # --- Audio decoders ---
+    # Audio decoders
     '--enable-decoder=aac'
-    '--enable-decoder=aac_fixed'
     '--enable-decoder=mp3float'
     '--enable-decoder=vorbis'
     '--enable-decoder=opus'
     '--enable-decoder=flac'
-    '--enable-decoder=alac'
     '--enable-decoder=pcm_s16le'
-    '--enable-decoder=pcm_s24le'
-    '--enable-decoder=pcm_f32le'
-    '--enable-decoder=pcm_s32le'
-    '--enable-decoder=ac3'
-    '--enable-decoder=ac3_fixed'
-    '--enable-decoder=eac3'
-    '--enable-decoder=wmav2'
 
-    # --- Demuxers ---
+    # Demuxers
     '--enable-demuxer=mov'
     '--enable-demuxer=matroska'
     '--enable-demuxer=mp3'
@@ -77,29 +61,19 @@ $ConfigureFlags = @(
     '--enable-demuxer=flac'
     '--enable-demuxer=wav'
     '--enable-demuxer=aac'
-    '--enable-demuxer=ac3'
-    '--enable-demuxer=eac3'
     '--enable-demuxer=mpegts'
     '--enable-demuxer=hls'
     '--enable-demuxer=flv'
-    '--enable-demuxer=aiff'
-    '--enable-demuxer=asf'
 
-    # --- Protocols ---
+    # Protocols
     '--enable-protocol=file'
     '--enable-protocol=http'
     '--enable-protocol=https'
     '--enable-protocol=tcp'
 
-    # --- Bitstream filters (needed for TS/HLS demuxing) ---
-    '--enable-bsf=h264_mp4toannexb'
-    '--enable-bsf=hevc_mp4toannexb'
-
-    # --- Parsers ---
+    # Parsers
     '--enable-parser=h264'
     '--enable-parser=hevc'
-    '--enable-parser=vp8'
-    '--enable-parser=vp9'
     '--enable-parser=aac'
     '--enable-parser=opus'
     '--enable-parser=vorbis'
