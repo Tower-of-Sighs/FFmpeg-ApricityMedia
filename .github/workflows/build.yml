@@ -102,6 +102,7 @@ jobs:
             mingw-w64-x86_64-crt-git
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-zlib
             diffutils
 
       - name: Install macOS build deps
