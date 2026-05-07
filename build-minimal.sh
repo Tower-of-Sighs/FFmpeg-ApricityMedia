@@ -68,9 +68,6 @@ BASE_FLAGS=(
     --disable-debug
     --enable-small
 
-    # Static-link GCC/STDC++ runtime (no MSYS2 deps at runtime)
-    --extra-ldflags='-static-libgcc -static-libstdc++'
-
     # --- Video decoders ---
     --enable-decoder=h264
     --enable-decoder=hevc
@@ -132,6 +129,7 @@ configure() {
                 --enable-protocol=http
                 --enable-protocol=https
                 --enable-protocol=tcp
+                --extra-ldflags="-static-libgcc -static-libstdc++"
             )
             ;;
         linux)
@@ -141,6 +139,7 @@ configure() {
                 --enable-protocol=http
                 --enable-protocol=https
                 --enable-protocol=tcp
+                --extra-ldflags="-static-libgcc -static-libstdc++"
             )
             ;;
         macos)
