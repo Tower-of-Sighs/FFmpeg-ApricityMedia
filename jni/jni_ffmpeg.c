@@ -712,6 +712,21 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
 
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoGetDurationMs
+ */
+JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoGetDurationMs
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)env; (void)clazz;
+    VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
+    if (!d || !d->fmt_ctx) return -1;
+    int64_t dur = d->fmt_ctx->duration;
+    if (dur <= 0 || dur == AV_NOPTS_VALUE) return -1;
+    return (jlong)(dur / 1000);
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * Method:    videoClose
  */
 JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoClose
@@ -890,6 +905,21 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
 {
     (void)env; (void)clazz;
     ad_rewind((AudioDecoder *)(intptr_t)handle);
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    audioGetDurationMs
+ */
+JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audioGetDurationMs
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)env; (void)clazz;
+    AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
+    if (!d || !d->fmt_ctx) return -1;
+    int64_t dur = d->fmt_ctx->duration;
+    if (dur <= 0 || dur == AV_NOPTS_VALUE) return -1;
+    return (jlong)(dur / 1000);
 }
 
 /*

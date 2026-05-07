@@ -42,6 +42,8 @@ $ConfigureFlags = @(
 
 # TLS for HTTPS on Windows (uses SChannel, no external libs)
     '--enable-schannel'
+    # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
+    '--extra-ldflags=-static-libgcc -static-libstdc++'
 
 # --- Video decoders ---
     '--enable-decoder=h264'
