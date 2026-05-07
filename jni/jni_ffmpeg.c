@@ -41,7 +41,6 @@
 #define AUDIO_OUT_SAMPLE_FMT   AV_SAMPLE_FMT_S16
 #define AUDIO_OUT_CHANNELS     2
 #define VIDEO_FRAME_POOL_SIZE  8
-#define MAX_DECODE_ATTEMPTS    32
 
 /* ================================================================
  *  Internal helpers
@@ -164,12 +163,7 @@ typedef struct {
     AVFrame          *decoded_frame;
     struct SwsContext *sws_ctx;
 
-    /* Reusable scratch buffer for sws_scale output (sws writes here,
-       then we copy into the pooled frame). */
-    uint8_t          *rgba_scratch;
-    int               rgba_scratch_size;
-
-    /* Frame pool */
+    /* Frame pool — sws_scale writes directly into pooled buffers */
     int               pool_size;
     VideoFrame       *pool;           /* array[pool_size] */
     int              *free_stack;     /* stack of free indices */
@@ -237,7 +231,6 @@ static void vd_free(VideoDecoder *d) {
     if (d->sws_ctx)       sws_freeContext(d->sws_ctx);
     if (d->decoded_frame) av_frame_free(&d->decoded_frame);
     if (d->pkt)           av_packet_free(&d->pkt);
-    if (d->rgba_scratch)  av_free(d->rgba_scratch);
     pool_free(d);
     av_free(d);
 }
@@ -274,6 +267,9 @@ static int vd_open(VideoDecoder *d, const char *path,
     d->codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
     d->codec_ctx->err_recognition |= AV_EF_IGNORE_ERR;
 
+    /* Multi-threaded frame decoding — critical for 4K60 */
+    d->codec_ctx->thread_count = 0;  /* auto = one thread per logical core */
+
     ret = avcodec_open2(d->codec_ctx, codec, NULL);
     if (ret < 0) return ret;
 
@@ -289,17 +285,12 @@ static int vd_open(VideoDecoder *d, const char *path,
     d->pkt           = av_packet_alloc();
     if (!d->decoded_frame || !d->pkt) return AVERROR(ENOMEM);
 
+    /* SWS_FAST_BILINEAR: x86 SIMD fast-path (MMXEXT), falls back to
+       SWS_BILINEAR on non-x86 — see libswscale/utils.c:1215 */
     d->sws_ctx = sws_getContext(d->src_width, d->src_height, d->codec_ctx->pix_fmt,
                                  d->out_width, d->out_height, AV_PIX_FMT_RGBA,
-                                 SWS_BILINEAR, NULL, NULL, NULL);
+                                 SWS_FAST_BILINEAR, NULL, NULL, NULL);
     if (!d->sws_ctx) return AVERROR(ENOMEM);
-
-    d->rgba_scratch_size = av_image_get_buffer_size(AV_PIX_FMT_RGBA,
-                                                     d->out_width, d->out_height, 1);
-    if (d->rgba_scratch_size <= 0) return AVERROR(EINVAL);
-
-    d->rgba_scratch = (uint8_t *)av_malloc(d->rgba_scratch_size);
-    if (!d->rgba_scratch) return AVERROR(ENOMEM);
 
     ret = pool_init(d, VIDEO_FRAME_POOL_SIZE, d->out_width, d->out_height);
     if (ret < 0) return ret;
@@ -384,8 +375,11 @@ produce:
         int idx = pool_pop(d);
         if (idx < 0) return -1;  /* pool exhausted, caller must release frames first */
 
-        /* sws_scale → scratch, then copy into pooled frame */
-        uint8_t *dst[] = { d->rgba_scratch, NULL, NULL, NULL };
+        /* sws_scale writes directly into the pooled frame's RGBA buffer.
+           Pool buffers come from av_malloc (64-byte aligned on x86_64 —
+           see libavutil/mem.c:65), optimal for sws SIMD fast-paths. */
+        VideoFrame *vf = &d->pool[idx];
+        uint8_t *dst[] = { vf->rgba_data, NULL, NULL, NULL };
         int dst_stride[] = { d->out_width * 4, 0, 0, 0 };
         int scaled = sws_scale(d->sws_ctx,
                                (const uint8_t *const *)d->decoded_frame->data,
@@ -396,8 +390,6 @@ produce:
             return -1;
         }
 
-        VideoFrame *vf = &d->pool[idx];
-        memcpy(vf->rgba_data, d->rgba_scratch, d->rgba_scratch_size);
         vf->width       = d->out_width;
         vf->height      = d->out_height;
         vf->pts_ms      = pts_ms;
@@ -785,7 +777,6 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
         return (jint)copy;
     }
 
-    /* Decode loop with EAGAIN-aware send */
     for (;;) {
         if (d->eof) {
             if (!d->drain_started) {
@@ -816,32 +807,47 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
             }
 
             /* Send with EAGAIN retry */
+            int sent = 0;
             for (;;) {
                 int send_ret = avcodec_send_packet(d->codec_ctx, d->pkt);
-                if (send_ret == 0) break;
+                if (send_ret == 0) { sent = 1; break; }
                 if (send_ret == AVERROR(EAGAIN)) {
-                    /* Drain one frame to make room, then retry */
-                    if (ad_receive(d) > 0) goto serve;
-                    continue;
+                    /* Decoder input full — drain one frame and serve it */
+                    if (ad_receive(d) > 0 && d->pending_bytes > d->pending_pos) {
+                        av_packet_unref(d->pkt);
+                        int avail = d->pending_bytes - d->pending_pos;
+                        int copy  = (max_copy < avail) ? max_copy : avail;
+                        if (copy > 0) {
+                            (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+                                                        (jbyte *)(d->out_buffer + d->pending_pos));
+                            d->pending_pos += copy;
+                            if (d->pending_pos >= d->pending_bytes) {
+                                d->pending_pos   = 0;
+                                d->pending_bytes = 0;
+                            }
+                            return (jint)copy;
+                        }
+                    }
+                    continue;  /* Retry send after draining */
                 }
                 break;  /* Other error, drop packet */
             }
             av_packet_unref(d->pkt);
 
-            if (ad_receive(d) > 0) {
-serve:
+            /* Receive decoded audio after successful send */
+            if (ad_receive(d) > 0 && d->pending_bytes > d->pending_pos) {
                 int avail = d->pending_bytes - d->pending_pos;
                 int copy  = (max_copy < avail) ? max_copy : avail;
-                if (copy <= 0) return 0;
-
-                (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
-                                            (jbyte *)(d->out_buffer + d->pending_pos));
-                d->pending_pos += copy;
-                if (d->pending_pos >= d->pending_bytes) {
-                    d->pending_pos   = 0;
-                    d->pending_bytes = 0;
+                if (copy > 0) {
+                    (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+                                                (jbyte *)(d->out_buffer + d->pending_pos));
+                    d->pending_pos += copy;
+                    if (d->pending_pos >= d->pending_bytes) {
+                        d->pending_pos   = 0;
+                        d->pending_bytes = 0;
+                    }
+                    return (jint)copy;
                 }
-                return (jint)copy;
             }
             continue;
         }
