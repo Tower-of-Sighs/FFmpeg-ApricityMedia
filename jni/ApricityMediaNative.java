@@ -59,6 +59,38 @@ public final class ApricityMediaNative {
      */
     public static native ByteBuffer videoFrameGetPixels(long frameHandle);
 
+    /** Pixel format tag: 0=RGBA8888, 1=YUV420P, 2=NV12, 3=YUV420P10LE, 4=P010LE. */
+    public static native int videoFrameGetPixelFormat(long frameHandle);
+
+    /** Number of valid planes for current frame. */
+    public static native int videoFrameGetPlaneCount(long frameHandle);
+
+    /**
+     * Get plane metadata.
+     * @param info int[3] filled as [rowStride, pixelStride, planeBytes]
+     * @return plane bytes, or 0 on error
+     */
+    public static native int videoFrameGetPlaneInfo(long frameHandle, int planeIndex, int[] info);
+
+    /**
+     * Get a direct ByteBuffer for requested plane.
+     * Valid until {@link #videoFrameRelease(long)} is called.
+     */
+    public static native ByteBuffer videoFrameGetPlaneBuffer(long frameHandle, int planeIndex);
+
+    /**
+     * Get color metadata.
+     * @param info int[4] filled as [colorspace, colorTrc, colorPrimaries, colorRange]
+     * @return 1 if filled, 0 on error
+     */
+    public static native int videoFrameGetColorInfo(long frameHandle, int[] info);
+
+    /**
+     * Get original decoded pixel format name from FFmpeg (e.g. yuv420p10le, nv12).
+     * Returns "unknown" when unavailable.
+     */
+    public static native String videoFrameGetSourcePixelFormat(long frameHandle);
+
     /** Release a decoded frame returned by {@link #videoReadFrame(long)}. */
     public static native void videoFrameRelease(long frameHandle);
 

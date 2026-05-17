@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <math.h>
 #include <stdio.h>
 
@@ -30,7 +31,9 @@
 #include <libavutil/log.h>
 #include <libavutil/mem.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/time.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 
@@ -43,6 +46,12 @@
 #define AUDIO_OUT_CHANNELS     2
 #define VIDEO_FRAME_POOL_SIZE  8
 
+#define AP_FRAME_FMT_RGBA8888  0
+#define AP_FRAME_FMT_YUV420P   1
+#define AP_FRAME_FMT_NV12      2
+#define AP_FRAME_FMT_YUV420P10LE 3
+#define AP_FRAME_FMT_P010LE    4
+
 /* ================================================================
  *  Internal helpers
  * ================================================================ */
@@ -53,6 +62,17 @@ static int is_remote(const char *path) {
 }
 
 static char g_last_error[1024] = "";
+
+/* Lightweight spin lock for JNI-side shared state (decoder registry / frame pool). */
+static void spin_lock(volatile int *lock_var) {
+    while (__sync_lock_test_and_set(lock_var, 1)) {
+        while (*lock_var) { }
+    }
+}
+
+static void spin_unlock(volatile int *lock_var) {
+    __sync_lock_release(lock_var);
+}
 
 static void clear_last_error(void) {
     g_last_error[0] = '\0';
@@ -168,6 +188,18 @@ static enum AVPixelFormat choose_software_pix_fmt(AVCodecContext *ctx, const enu
 
 typedef struct {
     uint8_t *rgba_data;    /* width * height * 4, pre-allocated into pool */
+    uint8_t *plane_data[4];
+    int      plane_capacity[4];
+    int      plane_size[4];
+    int      plane_linesize[4];
+    int      plane_pixel_stride[4];
+    int      plane_count;
+    int      pixel_format_tag;
+    int      color_space;
+    int      color_trc;
+    int      color_primaries;
+    int      color_range;
+    int      source_pix_fmt;
     int      width;
     int      height;
     int64_t  pts_ms;
@@ -196,23 +228,107 @@ typedef struct {
     int               pool_size;
     VideoFrame       *pool;           /* array[pool_size] */
     int              *free_stack;     /* stack of free indices */
+    int              *in_use;         /* array[pool_size], 1=in use, 0=free */
     int               free_count;
+    volatile int      pool_lock;
+    volatile int      api_refs;
+    volatile int      close_requested;
 
     int               eof;
     int64_t           fallback_pts_ms;
     int64_t           last_emitted_pts_ms;
 } VideoDecoder;
 
+/* --- Active decoder registry (prevents stale frame-handle deref after close) --- */
+#define MAX_ACTIVE_DECODERS 256
+static VideoDecoder *g_active_decoders[MAX_ACTIVE_DECODERS];
+static int g_active_decoder_count = 0;
+static volatile int g_decoder_registry_lock = 0;
+
+static void decoder_registry_add(VideoDecoder *d) {
+    if (!d) return;
+    spin_lock(&g_decoder_registry_lock);
+    if (g_active_decoder_count < MAX_ACTIVE_DECODERS) {
+        g_active_decoders[g_active_decoder_count++] = d;
+    }
+    spin_unlock(&g_decoder_registry_lock);
+}
+
+static int decoder_registry_remove(VideoDecoder *d) {
+    int removed = 0;
+    if (!d) return 0;
+    spin_lock(&g_decoder_registry_lock);
+    for (int i = 0; i < g_active_decoder_count; i++) {
+        if (g_active_decoders[i] == d) {
+            g_active_decoders[i] = g_active_decoders[g_active_decoder_count - 1];
+            g_active_decoders[g_active_decoder_count - 1] = NULL;
+            g_active_decoder_count--;
+            removed = 1;
+            break;
+        }
+    }
+    if (removed) {
+        d->close_requested = 1;
+    }
+    spin_unlock(&g_decoder_registry_lock);
+    return removed;
+}
+
+static VideoDecoder *decoder_registry_acquire(uintptr_t ptr) {
+    VideoDecoder *d = NULL;
+    spin_lock(&g_decoder_registry_lock);
+    for (int i = 0; i < g_active_decoder_count; i++) {
+        if ((uintptr_t)g_active_decoders[i] == ptr) {
+            d = g_active_decoders[i];
+            d->api_refs = __sync_add_and_fetch(&d->api_refs, 1);
+            break;
+        }
+    }
+    spin_unlock(&g_decoder_registry_lock);
+    return d;
+}
+
+static void decoder_registry_release(VideoDecoder *d) {
+    if (!d) return;
+    __sync_sub_and_fetch(&d->api_refs, 1);
+}
+
 /* --- Pool helpers --- */
 
 static int pool_pop(VideoDecoder *d) {
-    if (d->free_count <= 0) return -1;
-    return d->free_stack[--d->free_count];
+    int idx = -1;
+    if (!d || !d->free_stack || !d->in_use) return -1;
+    spin_lock(&d->pool_lock);
+    while (d->free_count > 0) {
+        idx = d->free_stack[--d->free_count];
+        if (idx < 0 || idx >= d->pool_size) {
+            idx = -1;
+            continue;
+        }
+        if (d->in_use[idx]) {
+            idx = -1;
+            continue;
+        }
+        d->in_use[idx] = 1;
+        break;
+    }
+    spin_unlock(&d->pool_lock);
+    return idx;
 }
 
 static void pool_push(VideoDecoder *d, int idx) {
+    if (!d || !d->free_stack || !d->in_use) return;
     if (idx < 0 || idx >= d->pool_size) return;
-    d->free_stack[d->free_count++] = idx;
+    spin_lock(&d->pool_lock);
+    if (!d->in_use[idx]) {
+        spin_unlock(&d->pool_lock);
+        return; /* duplicate / stale release */
+    }
+    d->in_use[idx] = 0;
+    if (d->free_count < d->pool_size) {
+        d->free_stack[d->free_count++] = idx;
+    }
+    spin_unlock(&d->pool_lock);
 }
 
 static int pool_init(VideoDecoder *d, int count, int w, int h) {
@@ -222,12 +338,28 @@ static int pool_init(VideoDecoder *d, int count, int w, int h) {
     d->pool_size = count;
     d->pool = (VideoFrame *)av_mallocz((size_t)count * sizeof(VideoFrame));
     d->free_stack = (int *)av_malloc((size_t)count * sizeof(int));
-    if (!d->pool || !d->free_stack) return AVERROR(ENOMEM);
+    d->in_use = (int *)av_mallocz((size_t)count * sizeof(int));
+    if (!d->pool || !d->free_stack || !d->in_use) return AVERROR(ENOMEM);
+    d->pool_lock = 0;
 
     for (int i = 0; i < count; i++) {
         d->pool[i].rgba_data = (uint8_t *)av_malloc(cap);
         if (!d->pool[i].rgba_data) return AVERROR(ENOMEM);
         d->pool[i].capacity = cap;
+        for (int p = 0; p < 4; p++) {
+            d->pool[i].plane_data[p] = NULL;
+            d->pool[i].plane_capacity[p] = 0;
+            d->pool[i].plane_size[p] = 0;
+            d->pool[i].plane_linesize[p] = 0;
+            d->pool[i].plane_pixel_stride[p] = 0;
+        }
+        d->pool[i].plane_count = 1;
+        d->pool[i].pixel_format_tag = AP_FRAME_FMT_RGBA8888;
+        d->pool[i].color_space = AVCOL_SPC_UNSPECIFIED;
+        d->pool[i].color_trc = AVCOL_TRC_UNSPECIFIED;
+        d->pool[i].color_primaries = AVCOL_PRI_UNSPECIFIED;
+        d->pool[i].color_range = AVCOL_RANGE_UNSPECIFIED;
+        d->pool[i].source_pix_fmt = AV_PIX_FMT_NONE;
         d->free_stack[i] = i;
     }
     d->free_count = count;
@@ -238,13 +370,53 @@ static void pool_free(VideoDecoder *d) {
     if (!d->pool) return;
     for (int i = 0; i < d->pool_size; i++) {
         if (d->pool[i].rgba_data) av_free(d->pool[i].rgba_data);
+        for (int p = 0; p < 4; p++) {
+            if (d->pool[i].plane_data[p] && d->pool[i].plane_data[p] != d->pool[i].rgba_data) {
+                av_free(d->pool[i].plane_data[p]);
+            }
+        }
     }
     av_free(d->pool);
     av_free(d->free_stack);
+    av_free(d->in_use);
     d->pool = NULL;
     d->free_stack = NULL;
+    d->in_use = NULL;
     d->pool_size = 0;
     d->free_count = 0;
+}
+
+static int ensure_plane_capacity(VideoFrame *vf, int plane, int size) {
+    if (!vf || plane < 0 || plane >= 4) return AVERROR(EINVAL);
+    if (size <= 0) return AVERROR(EINVAL);
+    if (vf->plane_data[plane] == vf->rgba_data) {
+        vf->plane_data[plane] = NULL;
+        vf->plane_capacity[plane] = 0;
+    }
+    if (vf->plane_data[plane] && vf->plane_capacity[plane] >= size) return 0;
+    if (vf->plane_data[plane]) {
+        av_free(vf->plane_data[plane]);
+        vf->plane_data[plane] = NULL;
+        vf->plane_capacity[plane] = 0;
+    }
+    vf->plane_data[plane] = (uint8_t *)av_malloc((size_t)size);
+    if (!vf->plane_data[plane]) return AVERROR(ENOMEM);
+    vf->plane_capacity[plane] = size;
+    return 0;
+}
+
+static int copy_plane_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride,
+                           int row_bytes, int rows)
+{
+    if (!dst || !src || row_bytes <= 0 || rows <= 0) return AVERROR(EINVAL);
+    if (dst_stride < row_bytes) return AVERROR(EINVAL);
+    if (src_stride < 0) {
+        src += (ptrdiff_t)(rows - 1) * (ptrdiff_t)src_stride;
+    }
+    for (int y = 0; y < rows; y++) {
+        memcpy(dst + (ptrdiff_t)y * dst_stride, src + (ptrdiff_t)y * src_stride, (size_t)row_bytes);
+    }
+    return 0;
 }
 
 /* --- Decoder lifecycle --- */
@@ -400,6 +572,7 @@ static int vd_decode_into_pool(VideoDecoder *d) {
 
 produce:
     {
+        AVFrame *f = d->decoded_frame;
         int64_t pts_ms = resolve_pts(d->decoded_frame, d->time_base, &d->fallback_pts_ms);
         int dur_ms     = resolve_dur(d->decoded_frame, d->time_base, d->default_duration_ms);
 
@@ -426,10 +599,142 @@ produce:
             return -1;
         }
 
-        vf->width       = d->out_width;
-        vf->height      = d->out_height;
-        vf->pts_ms      = pts_ms;
-        vf->duration_ms = dur_ms;
+        vf->width          = d->out_width;
+        vf->height         = d->out_height;
+        vf->pts_ms         = pts_ms;
+        vf->duration_ms    = dur_ms;
+        if (vf->plane_data[0] && vf->plane_data[0] != vf->rgba_data) {
+            av_free(vf->plane_data[0]);
+            vf->plane_data[0] = NULL;
+            vf->plane_capacity[0] = 0;
+        }
+        vf->pixel_format_tag = AP_FRAME_FMT_RGBA8888;
+        vf->plane_count    = 1;
+        vf->plane_data[0] = vf->rgba_data;
+        vf->plane_capacity[0] = vf->capacity;
+        vf->plane_size[0] = vf->width * vf->height * 4;
+        vf->plane_linesize[0] = vf->width * 4;
+        vf->plane_pixel_stride[0] = 4;
+        vf->color_space = f->colorspace;
+        vf->color_trc = f->color_trc;
+        vf->color_primaries = f->color_primaries;
+        vf->color_range = f->color_range;
+        vf->source_pix_fmt = f->format;
+        for (int p = 1; p < 4; p++) {
+            vf->plane_size[p] = 0;
+            vf->plane_linesize[p] = 0;
+            vf->plane_pixel_stride[p] = 0;
+        }
+
+        int in_fmt = f->format;
+        int allow_planar = (d->out_width == d->src_width) && (d->out_height == d->src_height);
+        if (allow_planar && in_fmt == AV_PIX_FMT_YUV420P) {
+            int y_w = f->width;
+            int y_h = f->height;
+            int uv_w = (y_w + 1) / 2;
+            int uv_h = (y_h + 1) / 2;
+            int y_stride = y_w;
+            int uv_stride = uv_w;
+            int y_bytes = y_stride * y_h;
+            int u_bytes = uv_stride * uv_h;
+            int v_bytes = uv_stride * uv_h;
+            if (ensure_plane_capacity(vf, 0, y_bytes) == 0 &&
+                ensure_plane_capacity(vf, 1, u_bytes) == 0 &&
+                ensure_plane_capacity(vf, 2, v_bytes) == 0 &&
+                copy_plane_rows(vf->plane_data[0], y_stride, f->data[0], f->linesize[0], y_w, y_h) == 0 &&
+                copy_plane_rows(vf->plane_data[1], uv_stride, f->data[1], f->linesize[1], uv_w, uv_h) == 0 &&
+                copy_plane_rows(vf->plane_data[2], uv_stride, f->data[2], f->linesize[2], uv_w, uv_h) == 0) {
+                vf->pixel_format_tag = AP_FRAME_FMT_YUV420P;
+                vf->plane_count = 3;
+                vf->plane_size[0] = y_bytes;
+                vf->plane_size[1] = u_bytes;
+                vf->plane_size[2] = v_bytes;
+                vf->plane_linesize[0] = y_stride;
+                vf->plane_linesize[1] = uv_stride;
+                vf->plane_linesize[2] = uv_stride;
+                vf->plane_pixel_stride[0] = 1;
+                vf->plane_pixel_stride[1] = 1;
+                vf->plane_pixel_stride[2] = 1;
+            }
+        } else if (allow_planar && in_fmt == AV_PIX_FMT_NV12) {
+            int y_w = f->width;
+            int y_h = f->height;
+            int uv_w = (y_w + 1) / 2;
+            int uv_h = (y_h + 1) / 2;
+            int y_stride = y_w;
+            int uv_stride = uv_w * 2;
+            int y_bytes = y_stride * y_h;
+            int uv_bytes = uv_stride * uv_h;
+            if (ensure_plane_capacity(vf, 0, y_bytes) == 0 &&
+                ensure_plane_capacity(vf, 1, uv_bytes) == 0 &&
+                copy_plane_rows(vf->plane_data[0], y_stride, f->data[0], f->linesize[0], y_w, y_h) == 0 &&
+                copy_plane_rows(vf->plane_data[1], uv_stride, f->data[1], f->linesize[1], uv_w * 2, uv_h) == 0) {
+                vf->pixel_format_tag = AP_FRAME_FMT_NV12;
+                vf->plane_count = 2;
+                vf->plane_size[0] = y_bytes;
+                vf->plane_size[1] = uv_bytes;
+                vf->plane_linesize[0] = y_stride;
+                vf->plane_linesize[1] = uv_stride;
+                vf->plane_pixel_stride[0] = 1;
+                vf->plane_pixel_stride[1] = 2;
+                vf->plane_size[2] = 0;
+                vf->plane_linesize[2] = 0;
+                vf->plane_pixel_stride[2] = 0;
+            }
+        } else if (allow_planar && in_fmt == AV_PIX_FMT_YUV420P10LE) {
+            int y_w = f->width;
+            int y_h = f->height;
+            int uv_w = (y_w + 1) / 2;
+            int uv_h = (y_h + 1) / 2;
+            int y_stride = y_w * 2;
+            int uv_stride = uv_w * 2;
+            int y_bytes = y_stride * y_h;
+            int u_bytes = uv_stride * uv_h;
+            int v_bytes = uv_stride * uv_h;
+            if (ensure_plane_capacity(vf, 0, y_bytes) == 0 &&
+                ensure_plane_capacity(vf, 1, u_bytes) == 0 &&
+                ensure_plane_capacity(vf, 2, v_bytes) == 0 &&
+                copy_plane_rows(vf->plane_data[0], y_stride, f->data[0], f->linesize[0], y_w * 2, y_h) == 0 &&
+                copy_plane_rows(vf->plane_data[1], uv_stride, f->data[1], f->linesize[1], uv_w * 2, uv_h) == 0 &&
+                copy_plane_rows(vf->plane_data[2], uv_stride, f->data[2], f->linesize[2], uv_w * 2, uv_h) == 0) {
+                vf->pixel_format_tag = AP_FRAME_FMT_YUV420P10LE;
+                vf->plane_count = 3;
+                vf->plane_size[0] = y_bytes;
+                vf->plane_size[1] = u_bytes;
+                vf->plane_size[2] = v_bytes;
+                vf->plane_linesize[0] = y_stride;
+                vf->plane_linesize[1] = uv_stride;
+                vf->plane_linesize[2] = uv_stride;
+                vf->plane_pixel_stride[0] = 2;
+                vf->plane_pixel_stride[1] = 2;
+                vf->plane_pixel_stride[2] = 2;
+            }
+        } else if (allow_planar && in_fmt == AV_PIX_FMT_P010LE) {
+            int y_w = f->width;
+            int y_h = f->height;
+            int uv_w = (y_w + 1) / 2;
+            int uv_h = (y_h + 1) / 2;
+            int y_stride = y_w * 2;
+            int uv_stride = uv_w * 4;
+            int y_bytes = y_stride * y_h;
+            int uv_bytes = uv_stride * uv_h;
+            if (ensure_plane_capacity(vf, 0, y_bytes) == 0 &&
+                ensure_plane_capacity(vf, 1, uv_bytes) == 0 &&
+                copy_plane_rows(vf->plane_data[0], y_stride, f->data[0], f->linesize[0], y_w * 2, y_h) == 0 &&
+                copy_plane_rows(vf->plane_data[1], uv_stride, f->data[1], f->linesize[1], uv_w * 4, uv_h) == 0) {
+                vf->pixel_format_tag = AP_FRAME_FMT_P010LE;
+                vf->plane_count = 2;
+                vf->plane_size[0] = y_bytes;
+                vf->plane_size[1] = uv_bytes;
+                vf->plane_linesize[0] = y_stride;
+                vf->plane_linesize[1] = uv_stride;
+                vf->plane_pixel_stride[0] = 2;
+                vf->plane_pixel_stride[1] = 4;
+                vf->plane_size[2] = 0;
+                vf->plane_linesize[2] = 0;
+                vf->plane_pixel_stride[2] = 0;
+            }
+        }
 
         d->last_emitted_pts_ms = pts_ms;
         return idx;
@@ -449,6 +754,7 @@ static void vd_release_frame(VideoDecoder *d, int pool_idx) {
 
 static VideoFrame *vd_get_frame(VideoDecoder *d, int pool_idx) {
     if (!d || pool_idx < 0 || pool_idx >= d->pool_size) return NULL;
+    if (!d->in_use || !d->in_use[pool_idx]) return NULL;
     return &d->pool[pool_idx];
 }
 
@@ -665,6 +971,9 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
         return 0;
     }
     (*env)->ReleaseStringUTFChars(env, jpath, path);
+    d->api_refs = 0;
+    d->close_requested = 0;
+    decoder_registry_add(d);
     return (jlong)(intptr_t)d;
 }
 
@@ -680,14 +989,19 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
     (JNIEnv *env, jclass clazz, jlong handle)
 {
     (void)env; (void)clazz;
-    VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) return 0;
 
     int idx = vd_read_frame_pool_idx(d);
-    if (idx < 0) return 0;
+    if (idx < 0) {
+        decoder_registry_release(d);
+        return 0;
+    }
 
     /* Pack: upper bits = decoder, lower 16 bits = pool index */
-    return (jlong)(((uintptr_t)d << 16) | (uint16_t)idx);
+    jlong out = (jlong)(((uintptr_t)d << 16) | (uint16_t)idx);
+    decoder_registry_release(d);
+    return out;
 }
 
 /*
@@ -700,11 +1014,14 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
 {
     (void)clazz;
     uintptr_t packed = (uintptr_t)frame_handle;
-    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
 
     VideoFrame *vf = vd_get_frame(d, idx);
-    if (!vf || !jinfo) return 0;
+    if (!d || !vf || !jinfo) {
+        decoder_registry_release(d);
+        return 0;
+    }
 
     jlong info[4];
     info[0] = (jlong)vf->width;
@@ -712,8 +1029,9 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     info[2] = (jlong)vf->pts_ms;
     info[3] = (jlong)vf->duration_ms;
     (*env)->SetLongArrayRegion(env, jinfo, 0, 4, info);
-
-    return (jint)(vf->width * vf->height * 4);
+    jint out = (jint)(vf->width * vf->height * 4);
+    decoder_registry_release(d);
+    return out;
 }
 
 /*
@@ -725,12 +1043,175 @@ JNIEXPORT jobject JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vi
 {
     (void)clazz;
     uintptr_t packed = (uintptr_t)frame_handle;
-    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
 
     VideoFrame *vf = vd_get_frame(d, idx);
-    if (!vf || !vf->rgba_data) return NULL;
-    return (*env)->NewDirectByteBuffer(env, vf->rgba_data, (jlong)vf->capacity);
+    if (!d || !vf || !vf->rgba_data) {
+        decoder_registry_release(d);
+        return NULL;
+    }
+    jobject out = (*env)->NewDirectByteBuffer(env, vf->rgba_data, (jlong)vf->capacity);
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetPixelFormat
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetPixelFormat
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return AP_FRAME_FMT_RGBA8888;
+    }
+    jint out = (jint)vf->pixel_format_tag;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetPlaneCount
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetPlaneCount
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jint out = (jint)vf->plane_count;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetPlaneInfo
+ * Signature: (JI[I)I info[3] = {rowStride, pixelStride, planeBytes}
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetPlaneInfo
+    (JNIEnv *env, jclass clazz, jlong frame_handle, jint plane_index, jintArray jinfo)
+{
+    (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    int plane = (int)plane_index;
+    if (plane < 0 || plane >= vf->plane_count || plane >= 4 || !jinfo) {
+        decoder_registry_release(d);
+        return 0;
+    }
+
+    jint info[3];
+    info[0] = (jint)vf->plane_linesize[plane];
+    info[1] = (jint)vf->plane_pixel_stride[plane];
+    info[2] = (jint)vf->plane_size[plane];
+    (*env)->SetIntArrayRegion(env, jinfo, 0, 3, info);
+    jint out = (jint)vf->plane_size[plane];
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetPlaneBuffer
+ */
+JNIEXPORT jobject JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetPlaneBuffer
+    (JNIEnv *env, jclass clazz, jlong frame_handle, jint plane_index)
+{
+    (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return NULL;
+    }
+    int plane = (int)plane_index;
+    if (plane < 0 || plane >= vf->plane_count || plane >= 4) {
+        decoder_registry_release(d);
+        return NULL;
+    }
+
+    uint8_t *ptr = vf->plane_data[plane];
+    int size = vf->plane_size[plane];
+    if (!ptr || size <= 0) {
+        decoder_registry_release(d);
+        return NULL;
+    }
+    jobject out = (*env)->NewDirectByteBuffer(env, ptr, (jlong)size);
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetColorInfo
+ * Signature: (J[I)I info[4] = {colorspace, color_trc, color_primaries, color_range}
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetColorInfo
+    (JNIEnv *env, jclass clazz, jlong frame_handle, jintArray jinfo)
+{
+    (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf || !jinfo) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jint info[4];
+    info[0] = (jint)vf->color_space;
+    info[1] = (jint)vf->color_trc;
+    info[2] = (jint)vf->color_primaries;
+    info[3] = (jint)vf->color_range;
+    (*env)->SetIntArrayRegion(env, jinfo, 0, 4, info);
+    decoder_registry_release(d);
+    return 1;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetSourcePixelFormat
+ */
+JNIEXPORT jstring JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetSourcePixelFormat
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return (*env)->NewStringUTF(env, "unknown");
+    }
+    const char *name = av_get_pix_fmt_name((enum AVPixelFormat)vf->source_pix_fmt);
+    if (!name || !name[0]) name = "unknown";
+    jstring out = (*env)->NewStringUTF(env, name);
+    decoder_registry_release(d);
+    return out;
 }
 
 /*
@@ -742,10 +1223,11 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
 {
     (void)env; (void)clazz;
     uintptr_t packed = (uintptr_t)frame_handle;
-    VideoDecoder *d = (VideoDecoder *)(packed >> 16);
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
-
+    if (!d) return;
     vd_release_frame(d, idx);
+    decoder_registry_release(d);
 }
 
 /*
@@ -756,7 +1238,10 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     (JNIEnv *env, jclass clazz, jlong handle)
 {
     (void)env; (void)clazz;
-    vd_rewind((VideoDecoder *)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) return;
+    vd_rewind(d);
+    decoder_registry_release(d);
 }
 
 /*
@@ -767,11 +1252,19 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
     (JNIEnv *env, jclass clazz, jlong handle)
 {
     (void)env; (void)clazz;
-    VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
-    if (!d || !d->fmt_ctx) return -1;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d || !d->fmt_ctx) {
+        decoder_registry_release(d);
+        return -1;
+    }
     int64_t dur = d->fmt_ctx->duration;
-    if (dur <= 0 || dur == AV_NOPTS_VALUE) return -1;
-    return (jlong)(dur / 1000);
+    if (dur <= 0 || dur == AV_NOPTS_VALUE) {
+        decoder_registry_release(d);
+        return -1;
+    }
+    jlong out = (jlong)(dur / 1000);
+    decoder_registry_release(d);
+    return out;
 }
 
 /*
@@ -782,7 +1275,15 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     (JNIEnv *env, jclass clazz, jlong handle)
 {
     (void)env; (void)clazz;
-    vd_free((VideoDecoder *)(intptr_t)handle);
+    VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
+    if (!d) return;
+    if (!decoder_registry_remove(d)) {
+        return; /* already closed / stale handle */
+    }
+    while (__sync_add_and_fetch(&d->api_refs, 0) > 0) {
+        av_usleep(1000);
+    }
+    vd_free(d);
 }
 
 /* ================================================================
@@ -986,9 +1487,3 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
     (void)env; (void)clazz;
     ad_free((AudioDecoder *)(intptr_t)handle);
 }
-
-
-
-
-
-
