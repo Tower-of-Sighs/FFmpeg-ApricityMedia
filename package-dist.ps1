@@ -33,9 +33,9 @@ $ErrorActionPreference = 'Stop'
 # FfInBin = $true -> look in bin/; $false -> look in lib/
 $platformDefs = @(
     [pscustomobject]@{ Name = "windows-x64";  Ext = "dll";   JniName = "apricitymedia-jni";     FfBase = @("avcodec-62","avformat-62","avutil-60","swresample-6","swscale-9");     FfInBin = $true;  RuntimeBase = @("apwinpthread_01","libdav1d-*") }
-    [pscustomobject]@{ Name = "macos-arm64";  Ext = "dylib"; JniName = "libapricitymedia-jni";  FfBase = @("libavcodec","libavformat","libavutil","libswresample","libswscale"); FfInBin = $false }
-    [pscustomobject]@{ Name = "linux-x64";    Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec","libavformat","libavutil","libswresample","libswscale"); FfInBin = $false }
-    [pscustomobject]@{ Name = "android-arm64";Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec","libavformat","libavutil","libswresample","libswscale"); FfInBin = $false }
+    [pscustomobject]@{ Name = "macos-arm64";  Ext = "dylib"; JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.62","libavformat.62","libavutil.60","libswresample.6","libswscale.9"); FfInBin = $false }
+    [pscustomobject]@{ Name = "linux-x64";    Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.so.62","libavformat.so.62","libavutil.so.60","libswresample.so.6","libswscale.so.9"); FfInBin = $false }
+    [pscustomobject]@{ Name = "android-arm64";Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.so.62","libavformat.so.62","libavutil.so.60","libswresample.so.6","libswscale.so.9"); FfInBin = $false }
 )
 
 # ---- Java -> Minecraft version mapping ----

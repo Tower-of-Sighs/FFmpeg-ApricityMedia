@@ -180,6 +180,7 @@ configure() {
                 --enable-protocol=tls
                 --enable-protocol=crypto
                 --enable-protocol=httpproxy
+                --install-name-dir='@loader_path'
             )
             ;;
         android)
