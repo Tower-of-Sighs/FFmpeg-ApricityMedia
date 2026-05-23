@@ -45,6 +45,17 @@ $ConfigureFlags = @(
     '--enable-network'
     '--disable-pthreads'
     '--enable-w32threads'
+    '--enable-d3d11va'
+    '--enable-dxva2'
+    '--enable-hwaccel=h264_d3d11va'
+    '--enable-hwaccel=h264_d3d11va2'
+    '--enable-hwaccel=hevc_d3d11va'
+    '--enable-hwaccel=hevc_d3d11va2'
+    '--enable-hwaccel=h264_dxva2'
+    '--enable-hwaccel=hevc_dxva2'
+    '--enable-ffnvcodec'
+    '--enable-cuda'
+    '--enable-nvdec'
     # Static-link GCC/STDC++ runtime so DLLs have no MSYS2 deps
     '--extra-ldflags="-static-libgcc -static-libstdc++"'
     # Prevent FFmpeg from auto-detecting and dynamically linking
@@ -339,6 +350,3 @@ switch ($command) {
         exit 1
     }
 }
-
-
-

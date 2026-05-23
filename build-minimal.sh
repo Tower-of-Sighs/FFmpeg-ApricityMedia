@@ -133,10 +133,19 @@ configure() {
                 --disable-pthreads
                 --enable-w32threads
                 --disable-vaapi
-                --disable-d3d11va
                 --disable-d3d12va
-                --disable-dxva2
                 --disable-mediafoundation
+                --enable-d3d11va
+                --enable-dxva2
+                --enable-hwaccel=h264_d3d11va
+                --enable-hwaccel=h264_d3d11va2
+                --enable-hwaccel=hevc_d3d11va
+                --enable-hwaccel=hevc_d3d11va2
+                --enable-hwaccel=h264_dxva2
+                --enable-hwaccel=hevc_dxva2
+                --enable-ffnvcodec
+                --enable-cuda
+                --enable-nvdec
                 --enable-libdav1d
                 --enable-protocol=file
                 --enable-protocol=http
@@ -173,6 +182,9 @@ configure() {
         macos)
             extra+=(
                 --enable-securetransport
+                --enable-videotoolbox
+                --enable-hwaccel=h264_videotoolbox
+                --enable-hwaccel=hevc_videotoolbox
                 --enable-protocol=file
                 --enable-protocol=http
                 --enable-protocol=https
@@ -416,8 +428,3 @@ case "$cmd" in
         exit 1
         ;;
 esac
-
-
-
-
-

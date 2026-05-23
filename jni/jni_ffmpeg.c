@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -27,6 +28,10 @@
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
+#if defined(_WIN32)
+#include <libavutil/hwcontext_d3d11va.h>
+#endif
 #include <libavutil/imgutils.h>
 #include <libavutil/log.h>
 #include <libavutil/mem.h>
@@ -51,6 +56,7 @@
 #define AP_FRAME_FMT_NV12      2
 #define AP_FRAME_FMT_YUV420P10LE 3
 #define AP_FRAME_FMT_P010LE    4
+#define AP_FRAME_FMT_RGBA16F   5
 
 /* ================================================================
  *  Internal helpers
@@ -182,6 +188,53 @@ static enum AVPixelFormat choose_software_pix_fmt(AVCodecContext *ctx, const enu
     return pix_fmts[0];
 }
 
+typedef enum {
+    AP_HW_BACKEND_NONE = 0,
+    AP_HW_BACKEND_D3D11VA = 1,
+    AP_HW_BACKEND_NVDEC = 2,
+    AP_HW_BACKEND_DXVA2 = 3,
+    AP_HW_BACKEND_VIDEOTOOLBOX = 4
+} ApHwBackend;
+
+static const char *ap_hw_backend_name(ApHwBackend backend) {
+    switch (backend) {
+        case AP_HW_BACKEND_D3D11VA: return "d3d11va";
+        case AP_HW_BACKEND_NVDEC: return "nvdec";
+        case AP_HW_BACKEND_DXVA2: return "dxva2";
+        case AP_HW_BACKEND_VIDEOTOOLBOX: return "videotoolbox";
+        default: return "none";
+    }
+}
+
+static ApHwBackend ap_parse_hw_preferred(const char *value) {
+    if (!value || !value[0]) return AP_HW_BACKEND_NONE;
+    if (!strcmp(value, "d3d11va")) return AP_HW_BACKEND_D3D11VA;
+    if (!strcmp(value, "nvdec")) return AP_HW_BACKEND_NVDEC;
+    if (!strcmp(value, "dxva2")) return AP_HW_BACKEND_DXVA2;
+    if (!strcmp(value, "videotoolbox")) return AP_HW_BACKEND_VIDEOTOOLBOX;
+    return AP_HW_BACKEND_NONE;
+}
+
+static enum AVHWDeviceType ap_backend_device_type(ApHwBackend backend) {
+    switch (backend) {
+        case AP_HW_BACKEND_D3D11VA: return AV_HWDEVICE_TYPE_D3D11VA;
+        case AP_HW_BACKEND_NVDEC: return AV_HWDEVICE_TYPE_CUDA;
+        case AP_HW_BACKEND_DXVA2: return AV_HWDEVICE_TYPE_DXVA2;
+        case AP_HW_BACKEND_VIDEOTOOLBOX: return AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+        default: return AV_HWDEVICE_TYPE_NONE;
+    }
+}
+
+static enum AVPixelFormat ap_backend_hw_pix_fmt(ApHwBackend backend) {
+    switch (backend) {
+        case AP_HW_BACKEND_D3D11VA: return AV_PIX_FMT_D3D11;
+        case AP_HW_BACKEND_NVDEC: return AV_PIX_FMT_CUDA;
+        case AP_HW_BACKEND_DXVA2: return AV_PIX_FMT_DXVA2_VLD;
+        case AP_HW_BACKEND_VIDEOTOOLBOX: return AV_PIX_FMT_VIDEOTOOLBOX;
+        default: return AV_PIX_FMT_NONE;
+    }
+}
+
 /* ================================================================
  *  VideoDecoder — with frame pool
  * ================================================================ */
@@ -200,6 +253,18 @@ typedef struct {
     int      color_primaries;
     int      color_range;
     int      source_pix_fmt;
+    int      gpu_is_frame;
+    int      gpu_backend_tag; /* 0=unknown,1=d3d11va,2=dxva2,3=nvdec,4=videotoolbox */
+    int64_t  gpu_handle;      /* backend-specific native handle */
+    int64_t  gpu_device_handle; /* e.g. ID3D11Device* */
+    int      gpu_subresource; /* d3d11/dxva2 array index when applicable */
+    int      gpu_surface_width;  /* actual backing surface width for interop */
+    int      gpu_surface_height; /* actual backing surface height for interop */
+#if defined(_WIN32)
+    ID3D11Texture2D *gpu_interop_texture; /* RGBA intermediate texture for D3D11->GL interop */
+    ID3D11VideoProcessorOutputView *gpu_interop_output_view;
+#endif
+    AVFrame *gpu_frame_ref;   /* hold HW surface lifetime for zero-copy interop */
     int      width;
     int      height;
     int64_t  pts_ms;
@@ -223,6 +288,32 @@ typedef struct {
     AVPacket         *pkt;
     AVFrame          *decoded_frame;
     struct SwsContext *sws_ctx;
+    int               sws_src_width;
+    int               sws_src_height;
+    enum AVPixelFormat sws_src_fmt;
+
+    int               hw_enabled;
+    int               hw_nvdec_enabled;
+    ApHwBackend       hw_preferred;
+    enum AVHWDeviceType hw_device_type;
+    enum AVPixelFormat hw_pix_fmt;
+    AVBufferRef      *hw_device_ctx;
+    int64_t           hw_device_handle;
+    int               hw_active;
+    char              hw_backend_name[24];
+    char              hw_probe_detail[512];
+    int               hw_zero_copy_logged;
+    int               hw_get_format_logged;
+#if defined(_WIN32)
+    ID3D11VideoDevice *d3d11_video_device;
+    ID3D11VideoContext *d3d11_video_context;
+    ID3D11VideoProcessorEnumerator *d3d11_vp_enum;
+    ID3D11VideoProcessor *d3d11_vp;
+    UINT              d3d11_vp_in_w;
+    UINT              d3d11_vp_in_h;
+    DXGI_FORMAT       d3d11_vp_in_fmt;
+    int               d3d11_vp_colorspace_logged;
+#endif
 
     /* Frame pool — sws_scale writes directly into pooled buffers */
     int               pool_size;
@@ -238,6 +329,404 @@ typedef struct {
     int64_t           fallback_pts_ms;
     int64_t           last_emitted_pts_ms;
 } VideoDecoder;
+
+#if defined(_WIN32)
+static void ap_release_d3d11_video_processor(VideoDecoder *d);
+static int ap_d3d11_convert_to_rgba_interop(VideoDecoder *d, VideoFrame *vf, const AVFrame *decoded_frame,
+                                            int64_t *out_gpu_handle, int *out_surface_w, int *out_surface_h);
+#ifndef AP_MAKEFOURCC
+#define AP_MAKEFOURCC(ch0, ch1, ch2, ch3) \
+    ((UINT)(uint8_t)(ch0) | ((UINT)(uint8_t)(ch1) << 8) | ((UINT)(uint8_t)(ch2) << 16) | ((UINT)(uint8_t)(ch3) << 24))
+#endif
+
+static UINT ap_d3d11_nominal_range_from_av(int color_range) {
+    return color_range == AVCOL_RANGE_JPEG ? 2u : 1u; /* 2=0-255, 1=16-235 */
+}
+
+static UINT ap_d3d11_matrix_from_av(int color_space) {
+    switch (color_space) {
+        case AVCOL_SPC_BT709:
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            return 1u; /* BT.709/HD matrix path */
+        default:
+            return 0u; /* BT.601/SD path */
+    }
+}
+
+static UINT ap_d3d11_vp_fourcc_from_dxgi(DXGI_FORMAT fmt) {
+    switch (fmt) {
+        case DXGI_FORMAT_P010: return AP_MAKEFOURCC('P', '0', '1', '0');
+        case DXGI_FORMAT_NV12: return AP_MAKEFOURCC('N', 'V', '1', '2');
+        default: return 0u; /* let driver use resource DXGI format */
+    }
+}
+#endif
+
+static void ap_hw_probe_reset(VideoDecoder *d) {
+    if (!d) return;
+    d->hw_probe_detail[0] = '\0';
+}
+
+static void ap_hw_probe_append(VideoDecoder *d, const char *msg) {
+    if (!d || !msg || !msg[0]) return;
+    size_t cur = strlen(d->hw_probe_detail);
+    if (cur >= sizeof(d->hw_probe_detail) - 1) return;
+    if (cur > 0) {
+        d->hw_probe_detail[cur++] = ';';
+        d->hw_probe_detail[cur++] = ' ';
+        if (cur >= sizeof(d->hw_probe_detail) - 1) {
+            d->hw_probe_detail[sizeof(d->hw_probe_detail) - 1] = '\0';
+            return;
+        }
+    }
+    snprintf(d->hw_probe_detail + cur, sizeof(d->hw_probe_detail) - cur, "%s", msg);
+}
+
+static void ap_hw_probe_appendf(VideoDecoder *d, const char *fmt, ...) {
+    if (!d || !fmt) return;
+    char line[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+    ap_hw_probe_append(d, line);
+    fprintf(stderr, "[ApricityMediaDiag] %s\n", line);
+    fflush(stderr);
+}
+
+static int ap_hw_backend_tag_from_device_type(enum AVHWDeviceType device_type) {
+    switch (device_type) {
+        case AV_HWDEVICE_TYPE_D3D11VA: return 1;
+        case AV_HWDEVICE_TYPE_DXVA2: return 2;
+        case AV_HWDEVICE_TYPE_CUDA: return 3;
+        case AV_HWDEVICE_TYPE_VIDEOTOOLBOX: return 4;
+        default: return 0;
+    }
+}
+
+static enum AVPixelFormat ap_hw_sw_pix_fmt_from_frame(const AVFrame *frame) {
+    if (!frame || !frame->hw_frames_ctx || !frame->hw_frames_ctx->data) return AV_PIX_FMT_NONE;
+    AVHWFramesContext *frames = (AVHWFramesContext *)frame->hw_frames_ctx->data;
+    if (!frames) return AV_PIX_FMT_NONE;
+    return frames->sw_format;
+}
+
+static int ap_frame_format_tag_from_pix_fmt(enum AVPixelFormat pix_fmt) {
+    switch (pix_fmt) {
+        case AV_PIX_FMT_YUV420P: return AP_FRAME_FMT_YUV420P;
+        case AV_PIX_FMT_NV12: return AP_FRAME_FMT_NV12;
+        case AV_PIX_FMT_YUV420P10LE: return AP_FRAME_FMT_YUV420P10LE;
+        case AV_PIX_FMT_P010LE: return AP_FRAME_FMT_P010LE;
+        default: return AP_FRAME_FMT_RGBA8888;
+    }
+}
+
+static int ap_is_d3d11_hw_pix_fmt(enum AVPixelFormat fmt) {
+    if (fmt == AV_PIX_FMT_D3D11) return 1;
+#ifdef AV_PIX_FMT_D3D11VA_VLD
+    if (fmt == AV_PIX_FMT_D3D11VA_VLD) return 1;
+#endif
+    return 0;
+}
+
+static int ap_can_zero_copy_interop(VideoDecoder *d, int gpu_backend_tag, const AVFrame *decoded_frame) {
+#if defined(_WIN32)
+    if (!d || !d->hw_active || gpu_backend_tag != 1 || d->hw_device_handle == 0 || !decoded_frame) return 0;
+    enum AVPixelFormat sw_fmt = ap_hw_sw_pix_fmt_from_frame(decoded_frame);
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(sw_fmt);
+    int rgba_compatible = 0;
+    if (desc && (desc->flags & AV_PIX_FMT_FLAG_RGB) && desc->nb_components == 4) {
+        int max_depth = 0;
+        for (int i = 0; i < desc->nb_components; i++) {
+            if (desc->comp[i].depth > max_depth) max_depth = desc->comp[i].depth;
+        }
+        rgba_compatible = (max_depth > 0 && max_depth <= 8);
+    }
+    if (!rgba_compatible) {
+        if (d->hw_zero_copy_logged == 0) {
+            d->hw_zero_copy_logged = -1;
+            ap_hw_probe_appendf(d,
+                                "hardware zero-copy interop disabled backend=%s sw_fmt=%s reason=unsupported_dxgi_for_gl_direct_sample",
+                                d->hw_backend_name[0] ? d->hw_backend_name : "unknown",
+                                av_get_pix_fmt_name(sw_fmt) ? av_get_pix_fmt_name(sw_fmt) : "unknown");
+        }
+        return 0;
+    }
+    return 1;
+#else
+    (void)d;
+    (void)gpu_backend_tag;
+    (void)decoded_frame;
+    return 0;
+#endif
+}
+
+static enum AVPixelFormat choose_hw_or_software_pix_fmt(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+    if (!pix_fmts) return AV_PIX_FMT_NONE;
+    VideoDecoder *d = (VideoDecoder *)ctx->opaque;
+    enum AVPixelFormat preferred = (d && d->hw_active) ? d->hw_pix_fmt : AV_PIX_FMT_NONE;
+    enum AVPixelFormat hw_fallback = AV_PIX_FMT_NONE;
+    if (preferred != AV_PIX_FMT_NONE) {
+        for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            if (*p == preferred) {
+                if (d && d->hw_active && !d->hw_get_format_logged) {
+                    d->hw_get_format_logged = 1;
+                    char list[512] = {0};
+                    int off = 0;
+                    for (const enum AVPixelFormat *q = pix_fmts; *q != AV_PIX_FMT_NONE; q++) {
+                        const char *name = av_get_pix_fmt_name(*q);
+                        off += snprintf(list + off, sizeof(list) - off, "%s%s%s",
+                                       name ? name : "?",
+                                       (*q == preferred) ? "(match)" : "",
+                                       (*(q + 1) != AV_PIX_FMT_NONE) ? ", " : "");
+                        if (off >= (int)sizeof(list) - 1) break;
+                    }
+                    ap_hw_probe_appendf(d,
+                            "get_format called preferred=%s offered=[%s] result=preferred_match",
+                            av_get_pix_fmt_name(preferred) ? av_get_pix_fmt_name(preferred) : "none",
+                            list[0] ? list : "empty");
+                }
+                return *p;
+            }
+            if (hw_fallback == AV_PIX_FMT_NONE) {
+                const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+                if (desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+                    hw_fallback = *p;
+                }
+            }
+        }
+    }
+    if (d && d->hw_active && hw_fallback != AV_PIX_FMT_NONE) {
+        if (!d->hw_get_format_logged) {
+            d->hw_get_format_logged = 1;
+            char list[512] = {0};
+            int off = 0;
+            for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+                const char *name = av_get_pix_fmt_name(*p);
+                off += snprintf(list + off, sizeof(list) - off, "%s%s%s",
+                               name ? name : "?",
+                               (*p == preferred) ? "(match)" : "",
+                               (*(p + 1) != AV_PIX_FMT_NONE) ? ", " : "");
+                if (off >= (int)sizeof(list) - 1) break;
+            }
+            ap_hw_probe_appendf(d,
+                    "get_format called preferred=%s offered=[%s] result=hw_fallback(%s)",
+                    av_get_pix_fmt_name(preferred) ? av_get_pix_fmt_name(preferred) : "none",
+                    list[0] ? list : "empty",
+                    av_get_pix_fmt_name(hw_fallback) ? av_get_pix_fmt_name(hw_fallback) : "unknown");
+        }
+        return hw_fallback;
+    }
+    if (d && d->hw_active && !d->hw_get_format_logged) {
+        d->hw_get_format_logged = 1;
+        char list[512] = {0};
+        int off = 0;
+        for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            const char *name = av_get_pix_fmt_name(*p);
+            off += snprintf(list + off, sizeof(list) - off, "%s%s%s",
+                           name ? name : "?",
+                           (*p == preferred) ? "(match)" : "",
+                           (*(p + 1) != AV_PIX_FMT_NONE) ? ", " : "");
+            if (off >= (int)sizeof(list) - 1) break;
+        }
+        ap_hw_probe_appendf(d,
+                "get_format called preferred=%s offered=[%s] result=%s",
+                av_get_pix_fmt_name(preferred) ? av_get_pix_fmt_name(preferred) : "none",
+                list[0] ? list : "empty",
+                "software_fallback");
+    }
+    return choose_software_pix_fmt(ctx, pix_fmts);
+}
+
+static int codec_supports_hw_config(const AVCodec *codec,
+                                    ApHwBackend backend,
+                                    enum AVHWDeviceType device_type,
+                                    enum AVPixelFormat hw_pix_fmt,
+                                    enum AVPixelFormat *matched_hw_pix_fmt,
+                                    int *matched_hw_methods)
+{
+    if (!codec || device_type == AV_HWDEVICE_TYPE_NONE || hw_pix_fmt == AV_PIX_FMT_NONE) return 0;
+    const AVCodecHWConfig *best = NULL;
+    int best_score = -1;
+    for (int i = 0; ; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
+        if (!cfg) break;
+        if (!(cfg->methods & (AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX |
+                              AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX |
+                              AV_CODEC_HW_CONFIG_METHOD_AD_HOC))) continue;
+        if (backend == AP_HW_BACKEND_D3D11VA) {
+            if (!(cfg->device_type == device_type || cfg->device_type == AV_HWDEVICE_TYPE_NONE)) continue;
+            if (!ap_is_d3d11_hw_pix_fmt(cfg->pix_fmt)) continue;
+        } else {
+            if (cfg->device_type != device_type) continue;
+            if (cfg->pix_fmt != hw_pix_fmt) continue;
+        }
+        /* Prefer modern hwdevice/hwframes configs over legacy AD_HOC entries. */
+        int score = 0;
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) score += 4;
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX) score += 2;
+        if (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_AD_HOC) score += 1;
+        if (backend == AP_HW_BACKEND_D3D11VA && cfg->device_type == device_type) score += 1;
+        if (score > best_score) {
+            best = cfg;
+            best_score = score;
+        }
+    }
+    if (best) {
+        if (matched_hw_pix_fmt) *matched_hw_pix_fmt = best->pix_fmt;
+        if (matched_hw_methods) *matched_hw_methods = best->methods;
+        return 1;
+    }
+    return 0;
+}
+
+static void ap_log_codec_hw_configs(VideoDecoder *d, const AVCodec *codec) {
+    if (!d || !codec) return;
+    int found = 0;
+    for (int i = 0; ; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
+        if (!cfg) break;
+        found = 1;
+        const char *dtype = av_hwdevice_get_type_name(cfg->device_type);
+        const char *pfmt = av_get_pix_fmt_name(cfg->pix_fmt);
+        const char *dname = dtype ? dtype : (cfg->device_type == AV_HWDEVICE_TYPE_NONE ? "none" : "unknown");
+        ap_hw_probe_appendf(d,
+                            "codec hwcfg[%d] device=%s pix_fmt=%s methods=0x%x",
+                            i,
+                            dname,
+                            pfmt ? pfmt : "unknown",
+                            cfg->methods);
+    }
+    if (!found) {
+        ap_hw_probe_appendf(d, "codec has no hwcfg entries");
+    }
+}
+
+static int vd_try_init_hw(VideoDecoder *d, const AVCodec *codec, ApHwBackend backend) {
+    if (!d || !codec) return AVERROR(EINVAL);
+    enum AVHWDeviceType device_type = ap_backend_device_type(backend);
+    enum AVPixelFormat hw_pix_fmt = ap_backend_hw_pix_fmt(backend);
+    enum AVPixelFormat matched_hw_pix_fmt = AV_PIX_FMT_NONE;
+    int matched_hw_methods = 0;
+    if (device_type == AV_HWDEVICE_TYPE_NONE || hw_pix_fmt == AV_PIX_FMT_NONE) return AVERROR(EINVAL);
+    if (!codec_supports_hw_config(codec, backend, device_type, hw_pix_fmt, &matched_hw_pix_fmt, &matched_hw_methods)) return AVERROR(ENOSYS);
+    if (backend == AP_HW_BACKEND_D3D11VA &&
+        !(matched_hw_methods & (AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX |
+                                AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX))) {
+        ap_hw_probe_appendf(d,
+                            "d3d11va matched AD_HOC-only hwcfg (pix_fmt=%s methods=0x%x), requires d3d11va2 hwaccel",
+                            av_get_pix_fmt_name(matched_hw_pix_fmt) ? av_get_pix_fmt_name(matched_hw_pix_fmt) : "unknown",
+                            matched_hw_methods);
+        return AVERROR(ENOSYS);
+    }
+
+    AVBufferRef *device_ref = NULL;
+    int ret = av_hwdevice_ctx_create(&device_ref, device_type, NULL, NULL, 0);
+    if (ret < 0 || !device_ref) {
+        if (device_ref) av_buffer_unref(&device_ref);
+        return ret < 0 ? ret : AVERROR(EINVAL);
+    }
+
+    d->codec_ctx->hw_device_ctx = av_buffer_ref(device_ref);
+    av_buffer_unref(&device_ref);
+    if (!d->codec_ctx->hw_device_ctx) {
+        return AVERROR(ENOMEM);
+    }
+    d->hw_device_ctx = av_buffer_ref(d->codec_ctx->hw_device_ctx);
+    d->hw_device_type = device_type;
+    d->hw_pix_fmt = matched_hw_pix_fmt != AV_PIX_FMT_NONE ? matched_hw_pix_fmt : hw_pix_fmt;
+    d->hw_active = 1;
+    d->hw_device_handle = 0;
+#if defined(_WIN32)
+    if (device_type == AV_HWDEVICE_TYPE_D3D11VA && d->hw_device_ctx && d->hw_device_ctx->data) {
+        AVHWDeviceContext *hwdev = (AVHWDeviceContext *)d->hw_device_ctx->data;
+        if (hwdev && hwdev->type == AV_HWDEVICE_TYPE_D3D11VA && hwdev->hwctx) {
+            AVD3D11VADeviceContext *d3d11 = (AVD3D11VADeviceContext *)hwdev->hwctx;
+            if (d3d11 && d3d11->device) {
+                d->hw_device_handle = (int64_t)(intptr_t)d3d11->device;
+            }
+        }
+    }
+#endif
+    snprintf(d->hw_backend_name, sizeof(d->hw_backend_name), "%s", ap_hw_backend_name(backend));
+    return 0;
+}
+
+static void vd_setup_hw(VideoDecoder *d, const AVCodec *codec) {
+    if (!d || !codec || !d->hw_enabled) return;
+    ApHwBackend candidates[4];
+    int count = 0;
+    ap_hw_probe_reset(d);
+
+#define AP_ADD_CANDIDATE(arr, cnt, val) \
+    do { \
+        int _exists = 0; \
+        for (int _i = 0; _i < (cnt); _i++) { if ((arr)[_i] == (val)) { _exists = 1; break; } } \
+        if (!_exists && (cnt) < (int)(sizeof(arr) / sizeof((arr)[0]))) { (arr)[(cnt)++] = (val); } \
+    } while (0)
+
+    if (d->hw_preferred != AP_HW_BACKEND_NONE) {
+        AP_ADD_CANDIDATE(candidates, count, d->hw_preferred);
+#if defined(_WIN32)
+        if (d->hw_preferred == AP_HW_BACKEND_D3D11VA) {
+            AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_DXVA2);
+            if (d->hw_nvdec_enabled) AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_NVDEC);
+        } else if (d->hw_preferred == AP_HW_BACKEND_DXVA2) {
+            AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_D3D11VA);
+            if (d->hw_nvdec_enabled) AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_NVDEC);
+        } else if (d->hw_preferred == AP_HW_BACKEND_NVDEC) {
+            AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_D3D11VA);
+            AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_DXVA2);
+        }
+#endif
+    } else {
+#if defined(_WIN32)
+        if (d->hw_nvdec_enabled) {
+            AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_NVDEC);
+        }
+        AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_D3D11VA);
+        AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_DXVA2);
+#elif defined(__APPLE__)
+        AP_ADD_CANDIDATE(candidates, count, AP_HW_BACKEND_VIDEOTOOLBOX);
+#endif
+    }
+
+    ap_hw_probe_appendf(d, "hardware decode probing codec=%s preferred=%s",
+                        codec->name ? codec->name : "unknown",
+                        ap_hw_backend_name(d->hw_preferred));
+    ap_log_codec_hw_configs(d, codec);
+
+    for (int i = 0; i < count; i++) {
+        ApHwBackend backend = candidates[i];
+        if (backend == AP_HW_BACKEND_NVDEC && !d->hw_nvdec_enabled) continue;
+
+        int ret = vd_try_init_hw(d, codec, backend);
+        if (ret == 0) {
+            ap_hw_probe_appendf(d, "hardware decode enabled backend=%s device=%s pix_fmt=%s",
+                                d->hw_backend_name,
+                                av_hwdevice_get_type_name(d->hw_device_type) ? av_hwdevice_get_type_name(d->hw_device_type) : "unknown",
+                                av_get_pix_fmt_name(d->hw_pix_fmt) ? av_get_pix_fmt_name(d->hw_pix_fmt) : "unknown");
+#undef AP_ADD_CANDIDATE
+            return;
+        }
+
+        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        ap_hw_probe_appendf(d, "hardware backend probe failed backend=%s code=%d reason=%s",
+                            ap_hw_backend_name(backend), ret, errbuf[0] ? errbuf : "unknown");
+    }
+
+    d->hw_active = 0;
+    d->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+    d->hw_pix_fmt = AV_PIX_FMT_NONE;
+    d->hw_device_handle = 0;
+    snprintf(d->hw_backend_name, sizeof(d->hw_backend_name), "%s", "none");
+    d->hw_zero_copy_logged = 0;
+    d->hw_get_format_logged = 0;
+    ap_hw_probe_appendf(d, "hardware decode unavailable, fallback to software");
+#undef AP_ADD_CANDIDATE
+}
 
 /* --- Active decoder registry (prevents stale frame-handle deref after close) --- */
 #define MAX_ACTIVE_DECODERS 256
@@ -324,6 +813,17 @@ static void pool_push(VideoDecoder *d, int idx) {
         spin_unlock(&d->pool_lock);
         return; /* duplicate / stale release */
     }
+    VideoFrame *vf = &d->pool[idx];
+    if (vf->gpu_frame_ref) {
+        av_frame_unref(vf->gpu_frame_ref);
+    }
+    vf->gpu_is_frame = 0;
+    vf->gpu_backend_tag = 0;
+    vf->gpu_handle = 0;
+    vf->gpu_device_handle = 0;
+    vf->gpu_subresource = 0;
+    vf->gpu_surface_width = 0;
+    vf->gpu_surface_height = 0;
     d->in_use[idx] = 0;
     if (d->free_count < d->pool_size) {
         d->free_stack[d->free_count++] = idx;
@@ -360,6 +860,19 @@ static int pool_init(VideoDecoder *d, int count, int w, int h) {
         d->pool[i].color_primaries = AVCOL_PRI_UNSPECIFIED;
         d->pool[i].color_range = AVCOL_RANGE_UNSPECIFIED;
         d->pool[i].source_pix_fmt = AV_PIX_FMT_NONE;
+        d->pool[i].gpu_is_frame = 0;
+        d->pool[i].gpu_backend_tag = 0;
+        d->pool[i].gpu_handle = 0;
+        d->pool[i].gpu_device_handle = 0;
+        d->pool[i].gpu_subresource = 0;
+        d->pool[i].gpu_surface_width = 0;
+        d->pool[i].gpu_surface_height = 0;
+#if defined(_WIN32)
+        d->pool[i].gpu_interop_texture = NULL;
+        d->pool[i].gpu_interop_output_view = NULL;
+#endif
+        d->pool[i].gpu_frame_ref = av_frame_alloc();
+        if (!d->pool[i].gpu_frame_ref) return AVERROR(ENOMEM);
         d->free_stack[i] = i;
     }
     d->free_count = count;
@@ -370,6 +883,17 @@ static void pool_free(VideoDecoder *d) {
     if (!d->pool) return;
     for (int i = 0; i < d->pool_size; i++) {
         if (d->pool[i].rgba_data) av_free(d->pool[i].rgba_data);
+        if (d->pool[i].gpu_frame_ref) av_frame_free(&d->pool[i].gpu_frame_ref);
+#if defined(_WIN32)
+        if (d->pool[i].gpu_interop_output_view) {
+            d->pool[i].gpu_interop_output_view->lpVtbl->Release(d->pool[i].gpu_interop_output_view);
+            d->pool[i].gpu_interop_output_view = NULL;
+        }
+        if (d->pool[i].gpu_interop_texture) {
+            d->pool[i].gpu_interop_texture->lpVtbl->Release(d->pool[i].gpu_interop_texture);
+            d->pool[i].gpu_interop_texture = NULL;
+        }
+#endif
         for (int p = 0; p < 4; p++) {
             if (d->pool[i].plane_data[p] && d->pool[i].plane_data[p] != d->pool[i].rgba_data) {
                 av_free(d->pool[i].plane_data[p]);
@@ -427,6 +951,10 @@ static VideoDecoder *vd_alloc(void) {
 
 static void vd_free(VideoDecoder *d) {
     if (!d) return;
+#if defined(_WIN32)
+    ap_release_d3d11_video_processor(d);
+#endif
+    if (d->hw_device_ctx)  av_buffer_unref(&d->hw_device_ctx);
     if (d->codec_ctx)     avcodec_free_context(&d->codec_ctx);
     if (d->fmt_ctx)       avformat_close_input(&d->fmt_ctx);
     if (d->sws_ctx)       sws_freeContext(d->sws_ctx);
@@ -438,7 +966,8 @@ static void vd_free(VideoDecoder *d) {
 
 static int vd_open(VideoDecoder *d, const char *path,
                    int tw, int th, double max_fps,
-                   int tmo, int buf_kb, int recon)
+                   int tmo, int buf_kb, int recon,
+                   int hw_enabled, int hw_nvdec_enabled, const char *hw_preferred)
 {
     d->fmt_ctx = avformat_alloc_context();
     if (!d->fmt_ctx) return AVERROR(ENOMEM);
@@ -457,9 +986,13 @@ static int vd_open(VideoDecoder *d, const char *path,
 
     const AVCodec *codec = NULL;
     if (st->codecpar->codec_id == AV_CODEC_ID_AV1) {
-        codec = avcodec_find_decoder_by_name("libdav1d");
-    }
-    if (!codec) {
+        if (!hw_enabled) {
+            codec = avcodec_find_decoder_by_name("libdav1d");
+        }
+        if (!codec) {
+            codec = avcodec_find_decoder(st->codecpar->codec_id);
+        }
+    } else {
         codec = avcodec_find_decoder(st->codecpar->codec_id);
     }
     if (!codec) return AVERROR_DECODER_NOT_FOUND;
@@ -473,7 +1006,25 @@ static int vd_open(VideoDecoder *d, const char *path,
     /* Error tolerance for live streams / imperfect sources */
     d->codec_ctx->flags2 |= AV_CODEC_FLAG2_SHOW_ALL;
     d->codec_ctx->err_recognition |= AV_EF_IGNORE_ERR;
+    d->codec_ctx->opaque = d;
     d->codec_ctx->get_format = choose_software_pix_fmt;
+
+    d->hw_enabled = hw_enabled ? 1 : 0;
+    d->hw_nvdec_enabled = hw_nvdec_enabled ? 1 : 0;
+    d->hw_preferred = ap_parse_hw_preferred(hw_preferred);
+    d->hw_active = 0;
+    d->hw_device_type = AV_HWDEVICE_TYPE_NONE;
+    d->hw_pix_fmt = AV_PIX_FMT_NONE;
+    d->hw_device_ctx = NULL;
+    d->hw_device_handle = 0;
+    snprintf(d->hw_backend_name, sizeof(d->hw_backend_name), "%s", "none");
+    ap_hw_probe_reset(d);
+    if (d->hw_enabled) {
+        vd_setup_hw(d, codec);
+        if (d->hw_active) {
+            d->codec_ctx->get_format = choose_hw_or_software_pix_fmt;
+        }
+    }
 
     /* Multi-threaded frame decoding — critical for 4K60 */
     d->codec_ctx->thread_count = 0;  /* auto = one thread per logical core */
@@ -493,12 +1044,10 @@ static int vd_open(VideoDecoder *d, const char *path,
     d->pkt           = av_packet_alloc();
     if (!d->decoded_frame || !d->pkt) return AVERROR(ENOMEM);
 
-    /* SWS_FAST_BILINEAR: x86 SIMD fast-path (MMXEXT), falls back to
-       SWS_BILINEAR on non-x86 — see libswscale/utils.c:1215 */
-    d->sws_ctx = sws_getContext(d->src_width, d->src_height, d->codec_ctx->pix_fmt,
-                                 d->out_width, d->out_height, AV_PIX_FMT_RGBA,
-                                 SWS_FAST_BILINEAR, NULL, NULL, NULL);
-    if (!d->sws_ctx) return AVERROR(ENOMEM);
+    d->sws_ctx = NULL;
+    d->sws_src_width = 0;
+    d->sws_src_height = 0;
+    d->sws_src_fmt = AV_PIX_FMT_NONE;
 
     ret = pool_init(d, VIDEO_FRAME_POOL_SIZE, d->out_width, d->out_height);
     if (ret < 0) return ret;
@@ -572,30 +1121,215 @@ static int vd_decode_into_pool(VideoDecoder *d) {
 
 produce:
     {
+        int gpu_is_frame = 0;
+        int gpu_backend_tag = 0;
+        int64_t gpu_handle = 0;
+        int64_t gpu_device_handle = 0;
+        int gpu_subresource = 0;
+        int gpu_surface_width = 0;
+        int gpu_surface_height = 0;
+        if (d->hw_active && d->decoded_frame->format == d->hw_pix_fmt) {
+            gpu_is_frame = 1;
+            gpu_backend_tag = ap_hw_backend_tag_from_device_type(d->hw_device_type);
+            gpu_surface_width = d->decoded_frame->width > 0 ? d->decoded_frame->width : d->out_width;
+            gpu_surface_height = d->decoded_frame->height > 0 ? d->decoded_frame->height : d->out_height;
+            if (gpu_backend_tag == 4) {
+                if (d->decoded_frame->data[3]) {
+                    gpu_handle = (int64_t)(intptr_t)d->decoded_frame->data[3];
+                }
+            } else if (d->decoded_frame->data[0]) {
+                gpu_handle = (int64_t)(intptr_t)d->decoded_frame->data[0];
+            }
+            gpu_device_handle = d->hw_device_handle;
+            if (d->decoded_frame->data[1]) {
+                gpu_subresource = (int)(intptr_t)d->decoded_frame->data[1];
+            }
+#if defined(_WIN32)
+            if (gpu_backend_tag == 1 && d->decoded_frame->data[0]) {
+                ID3D11Texture2D *tex = (ID3D11Texture2D *)(intptr_t)d->decoded_frame->data[0];
+                if (tex) {
+                    D3D11_TEXTURE2D_DESC desc;
+                    memset(&desc, 0, sizeof(desc));
+                    tex->lpVtbl->GetDesc(tex, &desc);
+                    if (desc.Width > 0) gpu_surface_width = (int)desc.Width;
+                    if (desc.Height > 0) gpu_surface_height = (int)desc.Height;
+                }
+            }
+#endif
+            if (gpu_handle == 0 || gpu_backend_tag == 0) {
+                gpu_is_frame = 0;
+                gpu_backend_tag = 0;
+                gpu_device_handle = 0;
+                gpu_subresource = 0;
+                gpu_surface_width = 0;
+                gpu_surface_height = 0;
+            }
+        }
+
+        int zero_copy_interop = ap_can_zero_copy_interop(d, gpu_backend_tag, d->decoded_frame);
         AVFrame *f = d->decoded_frame;
-        int64_t pts_ms = resolve_pts(d->decoded_frame, d->time_base, &d->fallback_pts_ms);
-        int dur_ms     = resolve_dur(d->decoded_frame, d->time_base, d->default_duration_ms);
+        AVFrame *sw_frame = NULL;
+        if (d->hw_active && d->decoded_frame->format == d->hw_pix_fmt && !zero_copy_interop) {
+            sw_frame = av_frame_alloc();
+            if (!sw_frame) return -1;
+            int tr = av_hwframe_transfer_data(sw_frame, d->decoded_frame, 0);
+            if (tr < 0) {
+                av_frame_free(&sw_frame);
+                return -1;
+            }
+            sw_frame->pts = d->decoded_frame->pts;
+            sw_frame->best_effort_timestamp = d->decoded_frame->best_effort_timestamp;
+            sw_frame->duration = d->decoded_frame->duration;
+            sw_frame->colorspace = d->decoded_frame->colorspace;
+            sw_frame->color_trc = d->decoded_frame->color_trc;
+            sw_frame->color_primaries = d->decoded_frame->color_primaries;
+            sw_frame->color_range = d->decoded_frame->color_range;
+            f = sw_frame;
+        }
+
+        int64_t pts_ms = resolve_pts(f, d->time_base, &d->fallback_pts_ms);
+        int dur_ms     = resolve_dur(f, d->time_base, d->default_duration_ms);
 
         if (d->min_frame_interval_ms > 0 &&
             d->last_emitted_pts_ms != INT64_MIN &&
-            (pts_ms - d->last_emitted_pts_ms) < d->min_frame_interval_ms)
+            (pts_ms - d->last_emitted_pts_ms) < d->min_frame_interval_ms) {
+            if (sw_frame) av_frame_free(&sw_frame);
             return -1;
+        }
 
         int idx = pool_pop(d);
-        if (idx < 0) return -1;  /* pool exhausted, caller must release frames first */
+        if (idx < 0) {
+            if (sw_frame) av_frame_free(&sw_frame);
+            return -1;  /* pool exhausted, caller must release frames first */
+        }
+
+        VideoFrame *vf = &d->pool[idx];
+        if (vf->gpu_frame_ref) {
+            av_frame_unref(vf->gpu_frame_ref);
+        }
+
+#if defined(_WIN32)
+        if (!zero_copy_interop && gpu_is_frame && gpu_backend_tag == 1) {
+            enum AVPixelFormat sw_fmt = ap_hw_sw_pix_fmt_from_frame(d->decoded_frame);
+            int64_t interop_handle = 0;
+            int interop_w = 0;
+            int interop_h = 0;
+            int cvt = ap_d3d11_convert_to_rgba_interop(d, vf, d->decoded_frame, &interop_handle, &interop_w, &interop_h);
+            if (cvt == 0 && interop_handle != 0) {
+                vf->width = d->decoded_frame->width > 0 ? d->decoded_frame->width : d->out_width;
+                vf->height = d->decoded_frame->height > 0 ? d->decoded_frame->height : d->out_height;
+                vf->pts_ms = pts_ms;
+                vf->duration_ms = dur_ms;
+                vf->pixel_format_tag = AP_FRAME_FMT_RGBA16F;
+                vf->plane_count = 0;
+                for (int p = 0; p < 4; p++) {
+                    vf->plane_data[p] = NULL;
+                    vf->plane_size[p] = 0;
+                    vf->plane_linesize[p] = 0;
+                    vf->plane_pixel_stride[p] = 0;
+                }
+                vf->color_space = d->decoded_frame->colorspace;
+                vf->color_trc = d->decoded_frame->color_trc;
+                vf->color_primaries = d->decoded_frame->color_primaries;
+                vf->color_range = d->decoded_frame->color_range;
+                vf->source_pix_fmt = sw_fmt != AV_PIX_FMT_NONE ? sw_fmt : d->decoded_frame->format;
+                vf->gpu_is_frame = 1;
+                vf->gpu_backend_tag = 1;
+                vf->gpu_handle = interop_handle;
+                vf->gpu_device_handle = d->hw_device_handle;
+                vf->gpu_subresource = 0;
+                vf->gpu_surface_width = interop_w > 0 ? interop_w : vf->width;
+                vf->gpu_surface_height = interop_h > 0 ? interop_h : vf->height;
+                d->last_emitted_pts_ms = pts_ms;
+                if (sw_frame) av_frame_free(&sw_frame);
+                return idx;
+            }
+        }
+#endif
+
+        if (zero_copy_interop) {
+            enum AVPixelFormat sw_fmt = ap_hw_sw_pix_fmt_from_frame(d->decoded_frame);
+            if (!d->hw_zero_copy_logged) {
+                d->hw_zero_copy_logged = 1;
+                av_log(NULL, AV_LOG_INFO,
+                       "[ApricityMediaDiag] hardware zero-copy path active backend=%s hw_fmt=%s sw_fmt=%s\n",
+                       d->hw_backend_name[0] ? d->hw_backend_name : "unknown",
+                       av_get_pix_fmt_name(d->decoded_frame->format) ? av_get_pix_fmt_name(d->decoded_frame->format) : "unknown",
+                       av_get_pix_fmt_name(sw_fmt) ? av_get_pix_fmt_name(sw_fmt) : "unknown");
+            }
+            vf->width = d->decoded_frame->width > 0 ? d->decoded_frame->width : d->out_width;
+            vf->height = d->decoded_frame->height > 0 ? d->decoded_frame->height : d->out_height;
+            vf->pts_ms = pts_ms;
+            vf->duration_ms = dur_ms;
+            if (gpu_backend_tag == 1) {
+                /* D3D11 interop path presents VP-converted RGBA16F to GL. */
+                vf->pixel_format_tag = AP_FRAME_FMT_RGBA16F;
+            } else {
+                vf->pixel_format_tag = ap_frame_format_tag_from_pix_fmt(sw_fmt);
+            }
+            vf->plane_count = 0;
+            for (int p = 0; p < 4; p++) {
+                vf->plane_data[p] = NULL;
+                vf->plane_size[p] = 0;
+                vf->plane_linesize[p] = 0;
+                vf->plane_pixel_stride[p] = 0;
+            }
+            vf->color_space = d->decoded_frame->colorspace;
+            vf->color_trc = d->decoded_frame->color_trc;
+            vf->color_primaries = d->decoded_frame->color_primaries;
+            vf->color_range = d->decoded_frame->color_range;
+            vf->source_pix_fmt = sw_fmt != AV_PIX_FMT_NONE ? sw_fmt : d->decoded_frame->format;
+            vf->gpu_is_frame = gpu_is_frame;
+            vf->gpu_backend_tag = gpu_backend_tag;
+            vf->gpu_handle = gpu_handle;
+            vf->gpu_device_handle = gpu_device_handle;
+            vf->gpu_subresource = gpu_subresource;
+            vf->gpu_surface_width = gpu_surface_width;
+            vf->gpu_surface_height = gpu_surface_height;
+            if (vf->gpu_frame_ref && av_frame_ref(vf->gpu_frame_ref, d->decoded_frame) < 0) {
+                pool_push(d, idx);
+                return -1;
+            }
+            d->last_emitted_pts_ms = pts_ms;
+            return idx;
+        }
 
         /* sws_scale writes directly into the pooled frame's RGBA buffer.
            Pool buffers come from av_malloc (64-byte aligned on x86_64 —
            see libavutil/mem.c:65), optimal for sws SIMD fast-paths. */
-        VideoFrame *vf = &d->pool[idx];
         uint8_t *dst[] = { vf->rgba_data, NULL, NULL, NULL };
         int dst_stride[] = { d->out_width * 4, 0, 0, 0 };
+        if (!d->sws_ctx ||
+            d->sws_src_width != f->width ||
+            d->sws_src_height != f->height ||
+            d->sws_src_fmt != f->format)
+        {
+            if (d->sws_ctx) {
+                sws_freeContext(d->sws_ctx);
+                d->sws_ctx = NULL;
+            }
+            /* SWS_FAST_BILINEAR: x86 SIMD fast-path (MMXEXT), falls back to bilinear */
+            d->sws_ctx = sws_getContext(
+                    f->width, f->height, (enum AVPixelFormat)f->format,
+                    d->out_width, d->out_height, AV_PIX_FMT_RGBA,
+                    SWS_FAST_BILINEAR, NULL, NULL, NULL);
+            if (!d->sws_ctx) {
+                pool_push(d, idx);
+                if (sw_frame) av_frame_free(&sw_frame);
+                return -1;
+            }
+            d->sws_src_width = f->width;
+            d->sws_src_height = f->height;
+            d->sws_src_fmt = (enum AVPixelFormat)f->format;
+        }
+
         int scaled = sws_scale(d->sws_ctx,
-                               (const uint8_t *const *)d->decoded_frame->data,
-                               d->decoded_frame->linesize,
-                               0, d->src_height, dst, dst_stride);
+                               (const uint8_t *const *)f->data,
+                               f->linesize,
+                               0, f->height, dst, dst_stride);
         if (scaled <= 0) {
             pool_push(d, idx);
+            if (sw_frame) av_frame_free(&sw_frame);
             return -1;
         }
 
@@ -620,6 +1354,14 @@ produce:
         vf->color_primaries = f->color_primaries;
         vf->color_range = f->color_range;
         vf->source_pix_fmt = f->format;
+        /* Non-zero-copy path exposes CPU frame only; do not surface stale GPU handles to Java. */
+        vf->gpu_is_frame = 0;
+        vf->gpu_backend_tag = 0;
+        vf->gpu_handle = 0;
+        vf->gpu_device_handle = 0;
+        vf->gpu_subresource = 0;
+        vf->gpu_surface_width = 0;
+        vf->gpu_surface_height = 0;
         for (int p = 1; p < 4; p++) {
             vf->plane_size[p] = 0;
             vf->plane_linesize[p] = 0;
@@ -737,6 +1479,7 @@ produce:
         }
 
         d->last_emitted_pts_ms = pts_ms;
+        if (sw_frame) av_frame_free(&sw_frame);
         return idx;
     }
 }
@@ -952,24 +1695,36 @@ JNIEXPORT jstring JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_la
 JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoOpen
     (JNIEnv *env, jclass clazz,
      jstring jpath, jint tw, jint th, jdouble max_fps,
-     jint tmo, jint buf_kb, jboolean recon)
+     jint tmo, jint buf_kb, jboolean recon,
+     jboolean hw_enabled, jboolean hw_nvdec_enabled, jstring jhw_preferred)
 {
     (void)clazz;
     clear_last_error();
     const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
     if (!path) return 0;
+    const char *hw_preferred = NULL;
+    if (jhw_preferred) {
+        hw_preferred = (*env)->GetStringUTFChars(env, jhw_preferred, NULL);
+    }
 
     VideoDecoder *d = vd_alloc();
-    if (!d) { (*env)->ReleaseStringUTFChars(env, jpath, path); return 0; }
+    if (!d) {
+        if (hw_preferred) (*env)->ReleaseStringUTFChars(env, jhw_preferred, hw_preferred);
+        (*env)->ReleaseStringUTFChars(env, jpath, path);
+        return 0;
+    }
 
     int ret = vd_open(d, path, (int)tw, (int)th, (double)max_fps,
-                       (int)tmo, (int)buf_kb, (int)recon);
+                       (int)tmo, (int)buf_kb, (int)recon,
+                       (int)hw_enabled, (int)hw_nvdec_enabled, hw_preferred ? hw_preferred : "auto");
     if (ret < 0) {
         set_last_error_from_code("videoOpen", path, ret);
+        if (hw_preferred) (*env)->ReleaseStringUTFChars(env, jhw_preferred, hw_preferred);
         (*env)->ReleaseStringUTFChars(env, jpath, path);
         vd_free(d);
         return 0;
     }
+    if (hw_preferred) (*env)->ReleaseStringUTFChars(env, jhw_preferred, hw_preferred);
     (*env)->ReleaseStringUTFChars(env, jpath, path);
     d->api_refs = 0;
     d->close_requested = 0;
@@ -1047,7 +1802,7 @@ JNIEXPORT jobject JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vi
     int idx = (int)(packed & 0xFFFF);
 
     VideoFrame *vf = vd_get_frame(d, idx);
-    if (!d || !vf || !vf->rgba_data) {
+    if (!d || !vf || !vf->rgba_data || vf->gpu_is_frame) {
         decoder_registry_release(d);
         return NULL;
     }
@@ -1075,6 +1830,120 @@ JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
     jint out = (jint)vf->pixel_format_tag;
     decoder_registry_release(d);
     return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameIsGpuFrame
+ */
+JNIEXPORT jboolean JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameIsGpuFrame
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return JNI_FALSE;
+    }
+    jboolean out = (vf->gpu_is_frame && vf->gpu_backend_tag > 0 && vf->gpu_handle != 0) ? JNI_TRUE : JNI_FALSE;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetGpuBackendTag
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetGpuBackendTag
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jint out = (jint)vf->gpu_backend_tag;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetGpuHandle
+ */
+JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetGpuHandle
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jlong out = (jlong)vf->gpu_handle;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetGpuSubresource
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetGpuSubresource
+    (JNIEnv *env, jclass clazz, jlong frame_handle)
+{
+    (void)env; (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jint out = (jint)vf->gpu_subresource;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoFrameGetGpuSurfaceInfo
+ * Signature: (J[I)I  info[2] = {surfaceWidth, surfaceHeight}
+ */
+JNIEXPORT jint JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoFrameGetGpuSurfaceInfo
+    (JNIEnv *env, jclass clazz, jlong frame_handle, jintArray jinfo)
+{
+    (void)clazz;
+    uintptr_t packed = (uintptr_t)frame_handle;
+    VideoDecoder *d = decoder_registry_acquire(packed >> 16);
+    int idx = (int)(packed & 0xFFFF);
+    VideoFrame *vf = vd_get_frame(d, idx);
+    if (!d || !vf || !jinfo) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    int len = (*env)->GetArrayLength(env, jinfo);
+    if (len < 2) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jint out_info[2];
+    out_info[0] = (jint)(vf->gpu_surface_width > 0 ? vf->gpu_surface_width : vf->width);
+    out_info[1] = (jint)(vf->gpu_surface_height > 0 ? vf->gpu_surface_height : vf->height);
+    (*env)->SetIntArrayRegion(env, jinfo, 0, 2, out_info);
+    decoder_registry_release(d);
+    return 1;
 }
 
 /*
@@ -1263,6 +2132,80 @@ JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_vide
         return -1;
     }
     jlong out = (jlong)(dur / 1000);
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoIsHardwareDecode
+ */
+JNIEXPORT jboolean JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoIsHardwareDecode
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)env; (void)clazz;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) {
+        decoder_registry_release(d);
+        return JNI_FALSE;
+    }
+    jboolean out = d->hw_active ? JNI_TRUE : JNI_FALSE;
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoGetHardwareBackend
+ */
+JNIEXPORT jstring JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoGetHardwareBackend
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)clazz;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) {
+        decoder_registry_release(d);
+        return (*env)->NewStringUTF(env, "unknown");
+    }
+    const char *name = (d->hw_backend_name[0] != '\0') ? d->hw_backend_name : "none";
+    jstring out = (*env)->NewStringUTF(env, name);
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoGetHardwareProbeMessage
+ */
+JNIEXPORT jstring JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoGetHardwareProbeMessage
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)clazz;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) {
+        decoder_registry_release(d);
+        return (*env)->NewStringUTF(env, "");
+    }
+    const char *msg = d->hw_probe_detail[0] ? d->hw_probe_detail : "";
+    jstring out = (*env)->NewStringUTF(env, msg);
+    decoder_registry_release(d);
+    return out;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoGetHardwareDeviceHandle
+ */
+JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoGetHardwareDeviceHandle
+    (JNIEnv *env, jclass clazz, jlong handle)
+{
+    (void)env; (void)clazz;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) {
+        decoder_registry_release(d);
+        return 0;
+    }
+    jlong out = (jlong)d->hw_device_handle;
     decoder_registry_release(d);
     return out;
 }
@@ -1487,3 +2430,242 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
     (void)env; (void)clazz;
     ad_free((AudioDecoder *)(intptr_t)handle);
 }
+
+#if defined(_WIN32)
+static void ap_release_d3d11_video_processor(VideoDecoder *d) {
+    if (!d) return;
+    if (d->d3d11_vp) {
+        d->d3d11_vp->lpVtbl->Release(d->d3d11_vp);
+        d->d3d11_vp = NULL;
+    }
+    if (d->d3d11_vp_enum) {
+        d->d3d11_vp_enum->lpVtbl->Release(d->d3d11_vp_enum);
+        d->d3d11_vp_enum = NULL;
+    }
+    if (d->d3d11_video_context) {
+        d->d3d11_video_context->lpVtbl->Release(d->d3d11_video_context);
+        d->d3d11_video_context = NULL;
+    }
+    if (d->d3d11_video_device) {
+        d->d3d11_video_device->lpVtbl->Release(d->d3d11_video_device);
+        d->d3d11_video_device = NULL;
+    }
+    d->d3d11_vp_in_w = 0;
+    d->d3d11_vp_in_h = 0;
+    d->d3d11_vp_in_fmt = DXGI_FORMAT_UNKNOWN;
+    d->d3d11_vp_colorspace_logged = 0;
+}
+
+static int ap_ensure_d3d11_video_processor(VideoDecoder *d, ID3D11Texture2D *src_tex, UINT src_w, UINT src_h) {
+    if (!d || !src_tex || src_w == 0 || src_h == 0) return AVERROR(EINVAL);
+    if (!d->d3d11_video_device || !d->d3d11_video_context) {
+        if (!d->hw_device_ctx || !d->hw_device_ctx->data) return AVERROR(EINVAL);
+        AVHWDeviceContext *hwdev = (AVHWDeviceContext *)d->hw_device_ctx->data;
+        if (!hwdev || hwdev->type != AV_HWDEVICE_TYPE_D3D11VA || !hwdev->hwctx) return AVERROR(EINVAL);
+        AVD3D11VADeviceContext *d3d11 = (AVD3D11VADeviceContext *)hwdev->hwctx;
+        if (!d3d11 || !d3d11->video_device || !d3d11->video_context) return AVERROR(EINVAL);
+        d->d3d11_video_device = d3d11->video_device;
+        d->d3d11_video_context = d3d11->video_context;
+        d->d3d11_video_device->lpVtbl->AddRef(d->d3d11_video_device);
+        d->d3d11_video_context->lpVtbl->AddRef(d->d3d11_video_context);
+    }
+
+    D3D11_TEXTURE2D_DESC src_desc;
+    memset(&src_desc, 0, sizeof(src_desc));
+    src_tex->lpVtbl->GetDesc(src_tex, &src_desc);
+
+    if (d->d3d11_vp && d->d3d11_vp_enum &&
+        d->d3d11_vp_in_w == src_w &&
+        d->d3d11_vp_in_h == src_h &&
+        d->d3d11_vp_in_fmt == src_desc.Format) {
+        return 0;
+    }
+
+    if (d->d3d11_vp) {
+        d->d3d11_vp->lpVtbl->Release(d->d3d11_vp);
+        d->d3d11_vp = NULL;
+    }
+    if (d->d3d11_vp_enum) {
+        d->d3d11_vp_enum->lpVtbl->Release(d->d3d11_vp_enum);
+        d->d3d11_vp_enum = NULL;
+    }
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content;
+    memset(&content, 0, sizeof(content));
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputWidth = src_w;
+    content.InputHeight = src_h;
+    content.OutputWidth = src_w;
+    content.OutputHeight = src_h;
+    content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+    HRESULT hr = d->d3d11_video_device->lpVtbl->CreateVideoProcessorEnumerator(
+            d->d3d11_video_device, &content, &d->d3d11_vp_enum);
+    if (FAILED(hr) || !d->d3d11_vp_enum) return AVERROR_EXTERNAL;
+
+    hr = d->d3d11_video_device->lpVtbl->CreateVideoProcessor(
+            d->d3d11_video_device, d->d3d11_vp_enum, 0, &d->d3d11_vp);
+    if (FAILED(hr) || !d->d3d11_vp) return AVERROR_EXTERNAL;
+
+    d->d3d11_vp_in_w = src_w;
+    d->d3d11_vp_in_h = src_h;
+    d->d3d11_vp_in_fmt = src_desc.Format;
+    return 0;
+}
+
+static int ap_ensure_interop_output_slot(VideoDecoder *d, VideoFrame *vf, UINT out_w, UINT out_h) {
+    if (!d || !vf || out_w == 0 || out_h == 0) return AVERROR(EINVAL);
+    int recreate = 0;
+    if (!vf->gpu_interop_texture || !vf->gpu_interop_output_view) {
+        recreate = 1;
+    } else {
+        D3D11_TEXTURE2D_DESC cur_desc;
+        memset(&cur_desc, 0, sizeof(cur_desc));
+        vf->gpu_interop_texture->lpVtbl->GetDesc(vf->gpu_interop_texture, &cur_desc);
+        if (cur_desc.Width != out_w || cur_desc.Height != out_h || cur_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            recreate = 1;
+        }
+    }
+    if (!recreate) return 0;
+
+    if (vf->gpu_interop_output_view) {
+        vf->gpu_interop_output_view->lpVtbl->Release(vf->gpu_interop_output_view);
+        vf->gpu_interop_output_view = NULL;
+    }
+    if (vf->gpu_interop_texture) {
+        vf->gpu_interop_texture->lpVtbl->Release(vf->gpu_interop_texture);
+        vf->gpu_interop_texture = NULL;
+    }
+
+    D3D11_TEXTURE2D_DESC out_desc;
+    memset(&out_desc, 0, sizeof(out_desc));
+    out_desc.Width = out_w;
+    out_desc.Height = out_h;
+    out_desc.MipLevels = 1;
+    out_desc.ArraySize = 1;
+    out_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    out_desc.SampleDesc.Count = 1;
+    out_desc.Usage = D3D11_USAGE_DEFAULT;
+    out_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    out_desc.CPUAccessFlags = 0;
+    out_desc.MiscFlags = 0;
+
+    ID3D11Device *dev = (ID3D11Device *)(intptr_t)d->hw_device_handle;
+    if (!dev) return AVERROR(EINVAL);
+    HRESULT hr = dev->lpVtbl->CreateTexture2D(dev, &out_desc, NULL, &vf->gpu_interop_texture);
+    if (FAILED(hr) || !vf->gpu_interop_texture) return AVERROR_EXTERNAL;
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_view_desc;
+    memset(&out_view_desc, 0, sizeof(out_view_desc));
+    out_view_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    out_view_desc.Texture2D.MipSlice = 0;
+    hr = d->d3d11_video_device->lpVtbl->CreateVideoProcessorOutputView(
+            d->d3d11_video_device,
+            (ID3D11Resource *)vf->gpu_interop_texture,
+            d->d3d11_vp_enum,
+            &out_view_desc,
+            &vf->gpu_interop_output_view);
+    if (FAILED(hr) || !vf->gpu_interop_output_view) return AVERROR_EXTERNAL;
+    return 0;
+}
+
+static int ap_d3d11_convert_to_rgba_interop(VideoDecoder *d, VideoFrame *vf, const AVFrame *decoded_frame,
+                                            int64_t *out_gpu_handle, int *out_surface_w, int *out_surface_h)
+{
+    if (!d || !vf || !decoded_frame || !out_gpu_handle || !out_surface_w || !out_surface_h) return AVERROR(EINVAL);
+    if (!decoded_frame->data[0]) return AVERROR(EINVAL);
+    ID3D11Texture2D *src_tex = (ID3D11Texture2D *)(intptr_t)decoded_frame->data[0];
+    UINT src_slice = decoded_frame->data[1] ? (UINT)(intptr_t)decoded_frame->data[1] : 0;
+    UINT visible_w = decoded_frame->width > 0 ? (UINT)decoded_frame->width : 0;
+    UINT visible_h = decoded_frame->height > 0 ? (UINT)decoded_frame->height : 0;
+    if (visible_w == 0 || visible_h == 0) return AVERROR(EINVAL);
+
+    D3D11_TEXTURE2D_DESC src_desc;
+    memset(&src_desc, 0, sizeof(src_desc));
+    src_tex->lpVtbl->GetDesc(src_tex, &src_desc);
+    int ret = ap_ensure_d3d11_video_processor(d, src_tex, src_desc.Width, src_desc.Height);
+    if (ret < 0) return ret;
+    ret = ap_ensure_interop_output_slot(d, vf, visible_w, visible_h);
+    if (ret < 0) return ret;
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_desc;
+    memset(&in_desc, 0, sizeof(in_desc));
+    in_desc.FourCC = ap_d3d11_vp_fourcc_from_dxgi(src_desc.Format);
+    in_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    in_desc.Texture2D.MipSlice = 0;
+    in_desc.Texture2D.ArraySlice = src_slice;
+
+    ID3D11VideoProcessorInputView *in_view = NULL;
+    HRESULT hr = d->d3d11_video_device->lpVtbl->CreateVideoProcessorInputView(
+            d->d3d11_video_device,
+            (ID3D11Resource *)src_tex,
+            d->d3d11_vp_enum,
+            &in_desc,
+            &in_view);
+    if (FAILED(hr) || !in_view) return AVERROR_EXTERNAL;
+
+    RECT src_rect = {0, 0, (LONG)visible_w, (LONG)visible_h};
+    RECT dst_rect = {0, 0, (LONG)visible_w, (LONG)visible_h};
+    d->d3d11_video_context->lpVtbl->VideoProcessorSetStreamSourceRect(d->d3d11_video_context, d->d3d11_vp, 0, TRUE, &src_rect);
+    d->d3d11_video_context->lpVtbl->VideoProcessorSetStreamDestRect(d->d3d11_video_context, d->d3d11_vp, 0, TRUE, &dst_rect);
+    d->d3d11_video_context->lpVtbl->VideoProcessorSetOutputTargetRect(d->d3d11_video_context, d->d3d11_vp, TRUE, &dst_rect);
+
+    /* Explicitly pin VP into matrix/range CSC behavior on legacy color-space API.
+       This API has no HDR transfer metadata (PQ/HLG), so HDR tone mapping is not done here. */
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE stream_cs;
+    memset(&stream_cs, 0, sizeof(stream_cs));
+    stream_cs.Usage = 0;
+    stream_cs.RGB_Range = 0;
+    stream_cs.YCbCr_Matrix = ap_d3d11_matrix_from_av(decoded_frame->colorspace);
+    stream_cs.YCbCr_xvYCC = 0;
+    stream_cs.Nominal_Range = ap_d3d11_nominal_range_from_av(decoded_frame->color_range);
+    d->d3d11_video_context->lpVtbl->VideoProcessorSetStreamColorSpace(
+            d->d3d11_video_context, d->d3d11_vp, 0, &stream_cs);
+
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_cs;
+    memset(&output_cs, 0, sizeof(output_cs));
+    output_cs.Usage = 0;
+    /* D3D11 spec: RGB_Range = 0(full), 1(limited). */
+    output_cs.RGB_Range = 0;
+    output_cs.YCbCr_Matrix = stream_cs.YCbCr_Matrix;
+    output_cs.YCbCr_xvYCC = 0;
+    output_cs.Nominal_Range = 2; /* 0-255 */
+    d->d3d11_video_context->lpVtbl->VideoProcessorSetOutputColorSpace(
+            d->d3d11_video_context, d->d3d11_vp, &output_cs);
+
+    if (!d->d3d11_vp_colorspace_logged) {
+        d->d3d11_vp_colorspace_logged = 1;
+        fprintf(stderr,
+                "[ApricityMediaDiag] d3d11 vp colorspace mode=csc_only streamMatrix=%u streamRange=%u outputRange=%u outputFmt=R16G16B16A16_FLOAT inputDxgi=%d fourcc=0x%08x\n",
+                (unsigned)stream_cs.YCbCr_Matrix,
+                (unsigned)stream_cs.Nominal_Range,
+                (unsigned)output_cs.Nominal_Range,
+                (int)src_desc.Format,
+                (unsigned)in_desc.FourCC);
+    }
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream;
+    memset(&stream, 0, sizeof(stream));
+    stream.Enable = TRUE;
+    stream.OutputIndex = 0;
+    stream.InputFrameOrField = 0;
+    stream.PastFrames = 0;
+    stream.FutureFrames = 0;
+    stream.pInputSurface = in_view;
+
+    hr = d->d3d11_video_context->lpVtbl->VideoProcessorBlt(
+            d->d3d11_video_context,
+            d->d3d11_vp,
+            vf->gpu_interop_output_view,
+            0,
+            1,
+            &stream);
+    in_view->lpVtbl->Release(in_view);
+    if (FAILED(hr)) return AVERROR_EXTERNAL;
+
+    *out_gpu_handle = (int64_t)(intptr_t)vf->gpu_interop_texture;
+    *out_surface_w = (int)visible_w;
+    *out_surface_h = (int)visible_h;
+    return 0;
+}
+#endif

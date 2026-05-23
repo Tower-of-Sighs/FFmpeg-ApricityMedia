@@ -103,6 +103,7 @@ jobs:
             mingw-w64-x86_64-nasm
             mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-dav1d
+            mingw-w64-x86_64-ffnvcodec-headers
             diffutils
 
       - name: Install macOS build deps
@@ -146,6 +147,7 @@ jobs:
         run: |
           pacman -Q mingw-w64-x86_64-dav1d
           pkg-config --modversion dav1d
+          pacman -Q mingw-w64-x86_64-ffnvcodec-headers
       - name: Build FFmpeg + JNI (Windows, Java 21)
         if: matrix.platform == 'windows-x64'
         shell: msys2 {0}
