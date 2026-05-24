@@ -1510,6 +1510,23 @@ static void vd_rewind(VideoDecoder *d) {
     avcodec_flush_buffers(d->codec_ctx);
 }
 
+static int vd_seek_ms(VideoDecoder *d, int64_t target_ms) {
+    if (!d || !d->fmt_ctx || !d->codec_ctx) return AVERROR(EINVAL);
+    if (target_ms < 0) target_ms = 0;
+    int64_t ts = av_rescale_q(target_ms, (AVRational){1, 1000}, d->time_base);
+    int ret = av_seek_frame(d->fmt_ctx, d->stream_index, ts, AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) {
+        int64_t global_ts = av_rescale_q(target_ms, (AVRational){1, 1000}, AV_TIME_BASE_Q);
+        ret = av_seek_frame(d->fmt_ctx, -1, global_ts, AVSEEK_FLAG_BACKWARD);
+    }
+    if (ret < 0) return ret;
+    avcodec_flush_buffers(d->codec_ctx);
+    d->eof = 0;
+    d->fallback_pts_ms = target_ms;
+    d->last_emitted_pts_ms = INT64_MIN;
+    return 0;
+}
+
 /* ================================================================
  *  AudioDecoder
  * ================================================================ */
@@ -1653,6 +1670,28 @@ static void ad_rewind(AudioDecoder *d) {
     avcodec_flush_buffers(d->codec_ctx);
     swr_close(d->swr);
     swr_init(d->swr);
+}
+
+static int ad_seek_ms(AudioDecoder *d, int64_t target_ms) {
+    if (!d || !d->fmt_ctx || !d->codec_ctx) return AVERROR(EINVAL);
+    if (target_ms < 0) target_ms = 0;
+    AVStream *st = d->fmt_ctx->streams[d->stream_index];
+    AVRational tb = (st && st->time_base.num > 0 && st->time_base.den > 0) ? st->time_base : (AVRational){1, 1000};
+    int64_t ts = av_rescale_q(target_ms, (AVRational){1, 1000}, tb);
+    int ret = av_seek_frame(d->fmt_ctx, d->stream_index, ts, AVSEEK_FLAG_BACKWARD);
+    if (ret < 0) {
+        int64_t global_ts = av_rescale_q(target_ms, (AVRational){1, 1000}, AV_TIME_BASE_Q);
+        ret = av_seek_frame(d->fmt_ctx, -1, global_ts, AVSEEK_FLAG_BACKWARD);
+    }
+    if (ret < 0) return ret;
+    avcodec_flush_buffers(d->codec_ctx);
+    d->eof = 0;
+    d->drain_started = 0;
+    d->pending_bytes = 0;
+    d->pending_pos = 0;
+    swr_close(d->swr);
+    swr_init(d->swr);
+    return 0;
 }
 
 /* ================================================================
@@ -2115,6 +2154,21 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_video
 
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    videoSeekMs
+ */
+JNIEXPORT jboolean JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoSeekMs
+    (JNIEnv *env, jclass clazz, jlong handle, jlong target_ms)
+{
+    (void)env; (void)clazz;
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    if (!d) return JNI_FALSE;
+    int ret = vd_seek_ms(d, (int64_t)target_ms);
+    decoder_registry_release(d);
+    return ret >= 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * Method:    videoGetDurationMs
  */
 JNIEXPORT jlong JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_videoGetDurationMs
@@ -2403,6 +2457,20 @@ JNIEXPORT void JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audio
 {
     (void)env; (void)clazz;
     ad_rewind((AudioDecoder *)(intptr_t)handle);
+}
+
+/*
+ * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
+ * Method:    audioSeekMs
+ */
+JNIEXPORT jboolean JNICALL Java_cc_sighs_apricitymedia_jni_ApricityMediaNative_audioSeekMs
+    (JNIEnv *env, jclass clazz, jlong handle, jlong target_ms)
+{
+    (void)env; (void)clazz;
+    AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
+    if (!d) return JNI_FALSE;
+    int ret = ad_seek_ms(d, (int64_t)target_ms);
+    return ret >= 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 /*
