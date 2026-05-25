@@ -99,7 +99,18 @@ foreach ($p in $platformDefs) {
                     Copy-Item -Path $jniSrc -Destination (Join-Path $stage "$($p.JniName).$($p.Ext)")
                 }
                 elseif ($jv.Runtime -eq 'ffmapi') {
-                    # Java 25 / MC 26.1 uses FFM API - no JNI wrapper is shipped.
+                    # Java 25 / MC 26.1 uses FFM API — ship the JNI-free library.
+                    # Built by: build-minimal.ps1 build-ffmapi
+                    $ffmapiSrc = Join-Path $binDir.FullName "am_ffmpeg.$($p.Ext)"
+                    if (-not (Test-Path $ffmapiSrc)) {
+                        # Might be in lib/ instead of bin/
+                        $ffmapiSrc = Join-Path $ffDir "am_ffmpeg.$($p.Ext)"
+                    }
+                    if (Test-Path $ffmapiSrc) {
+                        Copy-Item -Path $ffmapiSrc -Destination (Join-Path $stage "am_ffmpeg.$($p.Ext)")
+                    } else {
+                        Write-Warning "  $($jv.JavaLabel): am_ffmpeg.$($p.Ext) not found"
+                    }
                 }
                 else {
                     Write-Warning "  $($jv.JavaLabel): Unknown Runtime='$($jv.Runtime)', skipping"

@@ -193,9 +193,50 @@ jobs:
              build-minimal/dist/bin/${{ matrix.jni_lib }}-java17.${{ matrix.jni_ext }}
 
       # ===============================================================
-      #  MC 26.1 (Java 25) uses FFM API
-      #  No JNI wrapper is built for this target; we package FFmpeg libs only.
+      #  FFM API library for MC 26.1 (Java 25)
+      #  Plain C library (no JNI). Callable via Java FFM API / jextract.
       # ===============================================================
+
+      - uses: actions/setup-java@v4
+        if: matrix.platform != 'android-arm64'  # no jextract on Android yet
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Build FFM API library (Windows)
+        if: matrix.platform == 'windows-x64'
+        shell: msys2 {0}
+        run: |
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          bash build-minimal.sh build-ffmapi
+
+      - name: Build FFM API library (POSIX)
+        if: matrix.platform != 'windows-x64' && matrix.platform != 'android-arm64'
+        shell: bash
+        run: |
+          chmod +x build-minimal.sh
+          ./build-minimal.sh build-ffmapi
+
+      - name: Generate Java FFM API bindings via jextract
+        if: matrix.platform == 'linux-x64'  # run once on Linux
+        shell: bash
+        run: |
+          # jextract ships with JDK 25 in $JAVA_HOME/bin
+          JEXTRACT="$JAVA_HOME/bin/jextract"
+          if [ ! -f "$JEXTRACT" ]; then
+            echo "jextract not bundled, downloading..."
+            curl -sL -o /tmp/jextract.tar.gz \
+              "https://github.com/openjdk/jextract/releases/latest/download/jextract-25-linux.tar.gz"
+            tar xzf /tmp/jextract.tar.gz -C /tmp
+            JEXTRACT="/tmp/jextract-25/bin/jextract"
+          fi
+          mkdir -p jni/jextract-gen
+          "$JEXTRACT" \
+            --output jni/jextract-gen \
+            --target-package cc.sighs.apricitymedia.jni.ffm \
+            --library am_ffmpeg \
+            --header-class-name AmFfmpeg \
+            jni/am_ffmpeg.h
 
       # ===============================================================
       #  Package dist-mc zips (per platform)

@@ -333,6 +333,41 @@ function Invoke-All {
     Write-Host "Output: $(Join-Path $BuildDir 'dist/bin/')" -ForegroundColor Green
 }
 
+function Invoke-BuildFfmapi {
+    $ffinc = Join-Path $BuildDir "dist/include"
+    $fflib = Join-Path $BuildDir "dist/lib"
+    if (-not (Test-Path "$ffinc/libavcodec")) {
+        throw "FFmpeg headers not found at $ffinc. Run '.\build-minimal.ps1 build-ffmpeg' first."
+    }
+
+    Write-Step "Building FFM API native library (no JNI)"
+    Write-Host "  FFmpeg inc: $ffinc"
+    Write-Host "  FFmpeg lib: $fflib"
+
+    $null = New-Item -ItemType Directory -Path (Join-Path $BuildDir "dist/bin") -Force
+
+    $ffincMsys = Convert-ToMsysPath $ffinc
+    $fflibMsys = Convert-ToMsysPath $fflib
+    $outMsys = Convert-ToMsysPath (Join-Path $BuildDir "dist/bin/am_ffmpeg.dll")
+    $srcMsys = Convert-ToMsysPath (Join-Path $JniDir "am_ffmpeg.c")
+
+    Write-Host "  Output:   $(Join-Path $BuildDir 'dist/bin/am_ffmpeg.dll')" -ForegroundColor Gray
+
+    # Plain C shared library — no JNI headers, no JAVA_HOME dependency.
+    # Callable from Java FFM API via Linker.downcallHandle() or jextract bindings.
+    $script = "gcc -shared -o '$outMsys' -I'$ffincMsys' -L'$fflibMsys' '$srcMsys' -lavformat -lavcodec -lavutil -lswresample -lswscale -lm -O2 -s -Wl,--enable-runtime-pseudo-reloc -static-libgcc -static-libstdc++"
+    Invoke-Msys2Script $script
+
+    $outPath = Join-Path $BuildDir "dist/bin/am_ffmpeg.dll"
+    if (Test-Path $outPath) {
+        $item = Get-Item $outPath
+        Write-Host "`nFFM API library built:" -ForegroundColor Green
+        Write-Host "  $($item.Name) ($('{0:N0} KB' -f ($item.Length / 1KB)))" -ForegroundColor Green
+    } else {
+        throw "FFM API library not produced at $outPath"
+    }
+}
+
 # ================================================================
 # Entry point
 # ================================================================
@@ -343,10 +378,11 @@ switch ($command) {
     'configure'      { Invoke-Configure }
     'build-ffmpeg'   { Invoke-BuildFfmpeg }
     'build-jni'      { Invoke-BuildJni }
+    'build-ffmapi'   { Invoke-BuildFfmapi }
     'gen-header'     { Invoke-GenHeader }
     'all'            { Invoke-All }
     default {
-        Write-Host "Usage: $($MyInvocation.MyCommand.Name) [configure|build-ffmpeg|build-jni|gen-header|all]" -ForegroundColor Yellow
+        Write-Host "Usage: $($MyInvocation.MyCommand.Name) [configure|build-ffmpeg|build-jni|build-ffmapi|gen-header|all]" -ForegroundColor Yellow
         exit 1
     }
 }

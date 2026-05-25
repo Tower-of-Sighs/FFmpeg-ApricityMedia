@@ -399,6 +399,72 @@ build_jni() {
     echo "JNI library built: $out"
 }
 
+build_ffmapi() {
+    echo "=== Building FFM API native library (no JNI) ==="
+
+    local ffinc="$BUILD_DIR/dist/include"
+    local fflib="$BUILD_DIR/dist/lib"
+    if [ ! -f "$ffinc/libavcodec/avcodec.h" ]; then
+        echo "FFmpeg headers not found at $ffinc. Run build-ffmpeg first." >&2
+        exit 1
+    fi
+
+    local src="$SCRIPT_DIR/jni/am_ffmpeg.c"
+    local out="$BUILD_DIR/dist/bin/am_ffmpeg"
+
+    mkdir -p "$BUILD_DIR/dist/bin"
+
+    # Plain C shared library — no JNI headers needed.
+    # Callable from Java FFM API via Linker.downcallHandle() or jextract.
+    case "$platform" in
+        windows*)
+            out="$out.dll"
+            gcc -shared -o "$out" \
+                -I"$ffinc" -L"$fflib" \
+                "$src" \
+                -lavformat -lavcodec -lavutil -lswresample -lswscale \
+                -lm -O2 -s -static-libgcc -static-libstdc++
+            ;;
+        linux*)
+            out="$out.so"
+            gcc -shared -fPIC -o "$out" \
+                -I"$ffinc" -L"$fflib" \
+                "$src" \
+                -lavformat -lavcodec -lavutil -lswresample -lswscale \
+                -lm -O2 -s
+            ;;
+        macos*)
+            out="$out.dylib"
+            gcc -shared -o "$out" \
+                -I"$ffinc" -L"$fflib" \
+                "$src" \
+                -lavformat -lavcodec -lavutil -lswresample -lswscale \
+                -lm -O2 -framework CoreVideo -framework CoreMedia
+            ;;
+        android*)
+            out="$out.so"
+            local cc="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+            if [ -n "$ANDROID_NDK_HOME" ]; then
+                $cc -shared -fPIC -o "$out" \
+                    -I"$ffinc" -L"$fflib" \
+                    "$src" \
+                    -lavformat -lavcodec -lavutil -lswresample -lswscale \
+                    -lm -O2 -s
+            else
+                echo "ANDROID_NDK_HOME not set" >&2
+                exit 1
+            fi
+            ;;
+    esac
+
+    if [ -f "$out" ]; then
+        echo "FFM API library built: $out"
+    else
+        echo "FFM API library not produced" >&2
+        exit 1
+    fi
+}
+
 all() {
     local platform="${1:-$(detect_platform)}"
     configure "$platform"
@@ -422,9 +488,10 @@ case "$cmd" in
     configure)     configure "$platform" ;;
     build-ffmpeg)  build_ffmpeg ;;
     build-jni)     build_jni "$platform" ;;
+    build-ffmapi)  build_ffmapi ;;
     all)           all "$platform" ;;
     *)
-        echo "Usage: $0 {configure|build-ffmpeg|build-jni|all} [linux|macos|android|windows]" >&2
+        echo "Usage: $0 {configure|build-ffmpeg|build-jni|build-ffmapi|all} [linux|macos|android|windows]" >&2
         exit 1
         ;;
 esac
