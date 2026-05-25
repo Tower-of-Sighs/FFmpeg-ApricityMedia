@@ -12,10 +12,8 @@
  *   - Proper send/receive retry loops with EAGAIN handling
  */
 
-/* #include <jni.h> removed */
-#define AM_BUILD_DLL
 #include "am_ffmpeg.h"
-
+#define AM_BUILD_DLL
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1701,21 +1699,20 @@ static int ad_seek_ms(AudioDecoder *d, int64_t target_ms) {
  *  Lifecycle
  * ================================================================ */
 
-/* JNI_OnLoad removed — not needed for FFM API */
+/* JNI_OnLoad removed — FFM API */
 
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void()
+void am_init()
 {
     avformat_network_init();
 }
 
-const char*()
+const char* am_last_error()
 {
-    const char *msg = g_last_error[0] ? g_last_error : "";
-    return /* str */;
+    return g_last_error;
 }
 
 /* ================================================================
@@ -1726,20 +1723,20 @@ const char*()
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t(const char* jpath, int tw, int th, double max_fps, int tmo, int buf_kb, int recon, int hw_enabled, int hw_nvdec_enabled, const char* jhw_preferred)
+uint64_t am_video_open(const char* jpath, int tw, int th, double max_fps, int tmo, int buf_kb, int recon, int hw_enabled, int hw_nvdec_enabled, const char* jhw_preferred)
 {
     clear_last_error();
-    const char *path = /* str */;
+    const char *path = jpath;
     if (!path) return 0;
     const char *hw_preferred = NULL;
     if (jhw_preferred) {
-        hw_preferred = /* str */;
+        hw_preferred = jhw_preferred;
     }
 
     VideoDecoder *d = vd_alloc();
     if (!d) {
-        if (hw_preferred) ;
-        ;
+        if (hw_preferred) 
+        
         return 0;
     }
 
@@ -1748,17 +1745,17 @@ uint64_t(const char* jpath, int tw, int th, double max_fps, int tmo, int buf_kb,
                        (int)hw_enabled, (int)hw_nvdec_enabled, hw_preferred ? hw_preferred : "auto");
     if (ret < 0) {
         set_last_error_from_code("videoOpen", path, ret);
-        if (hw_preferred) ;
-        ;
+        if (hw_preferred) 
+        
         vd_free(d);
         return 0;
     }
-    if (hw_preferred) ;
-    ;
+    if (hw_preferred) 
+    
     d->api_refs = 0;
     d->close_requested = 0;
     decoder_registry_add(d);
-    return (jlong)(intptr_t)d;
+    return (int64_t)(intptr_t)d;
 }
 
 /*
@@ -1769,7 +1766,7 @@ uint64_t(const char* jpath, int tw, int th, double max_fps, int tmo, int buf_kb,
  * Bit layout: [decoder_ptr (48 bits)] | [pool_index (16 bits)]
  * 0 on EOF or no frame available.
  */
-uint64_t(int64_t handle)
+uint64_t am_video_read_frame(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) return 0;
@@ -1781,7 +1778,7 @@ uint64_t(int64_t handle)
     }
 
     /* Pack: upper bits = decoder, lower 16 bits = pool index */
-    jlong out = (jlong)(((uintptr_t)d << 16) | (uint16_t)idx);
+    int64_t out = (int64_t)(((uintptr_t)d << 16) | (uint16_t)idx);
     decoder_registry_release(d);
     return out;
 }
@@ -1803,13 +1800,13 @@ int am_video_frame_get_info(int64_t frame_handle, int64_t* jinfo)
         return 0;
     }
 
-    jlong info[4];
-    info[0] = (jlong)vf->width;
-    info[1] = (jlong)vf->height;
-    info[2] = (jlong)vf->pts_ms;
-    info[3] = (jlong)vf->duration_ms;
-    (*env)->SetLongArrayRegion(env, jinfo, 0, 4, info);
-    jint out = (jint)(vf->width * vf->height * 4);
+    int64_t info[4];
+    info[0] = (int64_t)vf->width;
+    info[1] = (int64_t)vf->height;
+    info[2] = (int64_t)vf->pts_ms;
+    info[3] = (int64_t)vf->duration_ms;
+    (*env)->SetLongArrayRegion(jinfo, 0, 4, info);
+    int out = (int)(vf->width * vf->height * 4);
     decoder_registry_release(d);
     return out;
 }
@@ -1818,7 +1815,7 @@ int am_video_frame_get_info(int64_t frame_handle, int64_t* jinfo)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void*(int64_t frame_handle)
+void* am_video_frame_get_pixels(int64_t frame_handle)
 {
     uintptr_t packed = (uintptr_t)frame_handle;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
@@ -1829,7 +1826,7 @@ void*(int64_t frame_handle)
         decoder_registry_release(d);
         return NULL;
     }
-    jobject out = /* buf */vf->capacity);
+    jobject out = vf->rgba_datavf->capacity);
     decoder_registry_release(d);
     return out;
 }
@@ -1848,7 +1845,7 @@ int am_video_frame_get_pixel_format(int64_t frame_handle)
         decoder_registry_release(d);
         return AP_FRAME_FMT_RGBA8888;
     }
-    jint out = (jint)vf->pixel_format_tag;
+    int out = (int)vf->pixel_format_tag;
     decoder_registry_release(d);
     return out;
 }
@@ -1867,7 +1864,7 @@ int am_video_frame_is_gpu(int64_t frame_handle)
         decoder_registry_release(d);
         return 0;
     }
-    jboolean out = (vf->gpu_is_frame && vf->gpu_backend_tag > 0 && vf->gpu_handle != 0) ? 1 : 0;
+    int out = (vf->gpu_is_frame && vf->gpu_backend_tag > 0 && vf->gpu_handle != 0) ? 1 : 0;
     decoder_registry_release(d);
     return out;
 }
@@ -1886,7 +1883,7 @@ int am_video_frame_get_gpu_backend(int64_t frame_handle)
         decoder_registry_release(d);
         return 0;
     }
-    jint out = (jint)vf->gpu_backend_tag;
+    int out = (int)vf->gpu_backend_tag;
     decoder_registry_release(d);
     return out;
 }
@@ -1895,7 +1892,7 @@ int am_video_frame_get_gpu_backend(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_get_gpu_handle(int64_t frame_handle)
+uint64_t am_video_frame_get_gpu_handle(int64_t frame_handle)
 {
     uintptr_t packed = (uintptr_t)frame_handle;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
@@ -1905,7 +1902,7 @@ int am_video_frame_get_gpu_handle(int64_t frame_handle)
         decoder_registry_release(d);
         return 0;
     }
-    jlong out = (jlong)vf->gpu_handle;
+    int64_t out = (int64_t)vf->gpu_handle;
     decoder_registry_release(d);
     return out;
 }
@@ -1924,7 +1921,7 @@ int am_video_frame_get_gpu_subresource(int64_t frame_handle)
         decoder_registry_release(d);
         return 0;
     }
-    jint out = (jint)vf->gpu_subresource;
+    int out = (int)vf->gpu_subresource;
     decoder_registry_release(d);
     return out;
 }
@@ -1944,15 +1941,10 @@ int am_video_frame_get_gpu_surface_info(int64_t frame_handle, int* jinfo)
         decoder_registry_release(d);
         return 0;
     }
-    int len = 0;
-    if (len < 2) {
-        decoder_registry_release(d);
-        return 0;
-    }
-    jint out_info[2];
-    out_info[0] = (jint)(vf->gpu_surface_width > 0 ? vf->gpu_surface_width : vf->width);
-    out_info[1] = (jint)(vf->gpu_surface_height > 0 ? vf->gpu_surface_height : vf->height);
-    (*env)->SetIntArrayRegion(env, jinfo, 0, 2, out_info);
+    int out_info[2];
+    out_info[0] = (int)(vf->gpu_surface_width > 0 ? vf->gpu_surface_width : vf->width);
+    out_info[1] = (int)(vf->gpu_surface_height > 0 ? vf->gpu_surface_height : vf->height);
+    (*env)->SetIntArrayRegion(jinfo, 0, 2, out_info);
     decoder_registry_release(d);
     return 1;
 }
@@ -1971,7 +1963,7 @@ int am_video_frame_get_plane_count(int64_t frame_handle)
         decoder_registry_release(d);
         return 0;
     }
-    jint out = (jint)vf->plane_count;
+    int out = (int)vf->plane_count;
     decoder_registry_release(d);
     return out;
 }
@@ -1997,12 +1989,12 @@ int am_video_frame_get_plane_info(int64_t frame_handle, int plane_index, int* ji
         return 0;
     }
 
-    jint info[3];
-    info[0] = (jint)vf->plane_linesize[plane];
-    info[1] = (jint)vf->plane_pixel_stride[plane];
-    info[2] = (jint)vf->plane_size[plane];
-    (*env)->SetIntArrayRegion(env, jinfo, 0, 3, info);
-    jint out = (jint)vf->plane_size[plane];
+    int info[3];
+    info[0] = (int)vf->plane_linesize[plane];
+    info[1] = (int)vf->plane_pixel_stride[plane];
+    info[2] = (int)vf->plane_size[plane];
+    (*env)->SetIntArrayRegion(jinfo, 0, 3, info);
+    int out = (int)vf->plane_size[plane];
     decoder_registry_release(d);
     return out;
 }
@@ -2011,7 +2003,7 @@ int am_video_frame_get_plane_info(int64_t frame_handle, int plane_index, int* ji
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void*(int64_t frame_handle, int plane_index)
+void* am_video_frame_get_plane_buffer(int64_t frame_handle, int plane_index)
 {
     uintptr_t packed = (uintptr_t)frame_handle;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
@@ -2033,7 +2025,7 @@ void*(int64_t frame_handle, int plane_index)
         decoder_registry_release(d);
         return NULL;
     }
-    jobject out = /* buf */size);
+    jobject out = ptrsize);
     decoder_registry_release(d);
     return out;
 }
@@ -2053,12 +2045,12 @@ int am_video_frame_get_color_info(int64_t frame_handle, int* jinfo)
         decoder_registry_release(d);
         return 0;
     }
-    jint info[4];
-    info[0] = (jint)vf->color_space;
-    info[1] = (jint)vf->color_trc;
-    info[2] = (jint)vf->color_primaries;
-    info[3] = (jint)vf->color_range;
-    (*env)->SetIntArrayRegion(env, jinfo, 0, 4, info);
+    int info[4];
+    info[0] = (int)vf->color_space;
+    info[1] = (int)vf->color_trc;
+    info[2] = (int)vf->color_primaries;
+    info[3] = (int)vf->color_range;
+    (*env)->SetIntArrayRegion(jinfo, 0, 4, info);
     decoder_registry_release(d);
     return 1;
 }
@@ -2067,7 +2059,7 @@ int am_video_frame_get_color_info(int64_t frame_handle, int* jinfo)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char*(int64_t frame_handle)
+const char* am_video_frame_get_source_pixel_format(int64_t frame_handle)
 {
     uintptr_t packed = (uintptr_t)frame_handle;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
@@ -2075,11 +2067,11 @@ const char*(int64_t frame_handle)
     VideoFrame *vf = vd_get_frame(d, idx);
     if (!d || !vf) {
         decoder_registry_release(d);
-        return /* str */;
+        return "unknown";
     }
     const char *name = av_get_pix_fmt_name((enum AVPixelFormat)vf->source_pix_fmt);
     if (!name || !name[0]) name = "unknown";
-    jstring out = /* str */;
+    jstring out = name;
     decoder_registry_release(d);
     return out;
 }
@@ -2088,7 +2080,7 @@ const char*(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_release(int64_t frame_handle)
+void am_video_frame_release(int64_t frame_handle)
 {
     uintptr_t packed = (uintptr_t)frame_handle;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
@@ -2102,7 +2094,7 @@ int am_video_frame_release(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_rewind(int64_t handle)
+void am_video_rewind(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) return;
@@ -2127,7 +2119,7 @@ int am_video_seek_ms(int64_t handle, int64_t target_ms)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int64_t(int64_t handle)
+int64_t am_video_get_duration_ms(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d || !d->fmt_ctx) {
@@ -2139,7 +2131,7 @@ int64_t(int64_t handle)
         decoder_registry_release(d);
         return -1;
     }
-    jlong out = (jlong)(dur / 1000);
+    int64_t out = (int64_t)(dur / 1000);
     decoder_registry_release(d);
     return out;
 }
@@ -2155,7 +2147,7 @@ int am_video_is_hardware_decode(int64_t handle)
         decoder_registry_release(d);
         return 0;
     }
-    jboolean out = d->hw_active ? 1 : 0;
+    int out = d->hw_active ? 1 : 0;
     decoder_registry_release(d);
     return out;
 }
@@ -2164,15 +2156,15 @@ int am_video_is_hardware_decode(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char*(int64_t handle)
+const char* am_video_get_hardware_backend(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) {
         decoder_registry_release(d);
-        return /* str */;
+        return "unknown";
     }
     const char *name = (d->hw_backend_name[0] != '\0') ? d->hw_backend_name : "none";
-    jstring out = /* str */;
+    jstring out = name;
     decoder_registry_release(d);
     return out;
 }
@@ -2181,15 +2173,15 @@ const char*(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char*(int64_t handle)
+const char* am_video_get_hardware_probe_message(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) {
         decoder_registry_release(d);
-        return /* str */;
+        return "";
     }
     const char *msg = d->hw_probe_detail[0] ? d->hw_probe_detail : "";
-    jstring out = /* str */;
+    jstring out = msg;
     decoder_registry_release(d);
     return out;
 }
@@ -2198,14 +2190,14 @@ const char*(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t(int64_t handle)
+uint64_t am_video_get_hardware_device_handle(int64_t handle)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
     if (!d) {
         decoder_registry_release(d);
         return 0;
     }
-    jlong out = (jlong)d->hw_device_handle;
+    int64_t out = (int64_t)d->hw_device_handle;
     decoder_registry_release(d);
     return out;
 }
@@ -2214,7 +2206,7 @@ uint64_t(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_close(int64_t handle)
+void am_video_close(int64_t handle)
 {
     VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
     if (!d) return;
@@ -2235,24 +2227,24 @@ int am_video_close(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t(const char* jpath, int tmo, int buf_kb, int recon)
+uint64_t am_audio_open(const char* jpath, int tmo, int buf_kb, int recon)
 {
     clear_last_error();
-    const char *path = /* str */;
+    const char *path = jpath;
     if (!path) return 0;
 
     AudioDecoder *d = ad_alloc();
-    if (!d) { ; return 0; }
+    if (!d) {  return 0; }
 
     int ret = ad_open(d, path, (int)tmo, (int)buf_kb, (int)recon);
     if (ret < 0) {
         set_last_error_from_code("audioOpen", path, ret);
-        ;
+        
         ad_free(d);
         return 0;
     }
-    ;
-    return (jlong)(intptr_t)d;
+    
+    return (int64_t)(intptr_t)d;
 }
 
 /*
@@ -2263,23 +2255,18 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
 {
     AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
     if (!d || !jbuf || length <= 0) return -2;
-    jsize buf_len = 0;
-    if (offset < 0 || offset >= buf_len) return -2;
-    int max_copy = (length < buf_len - offset) ? length : (buf_len - offset);
-    if (max_copy <= 0) return -2;
-
     /* Serve from pending */
     if (d->pending_bytes > d->pending_pos) {
         int avail = d->pending_bytes - d->pending_pos;
         int copy  = (max_copy < avail) ? max_copy : avail;
-        (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+        (*env)->SetByteArrayRegion(jbuf, offset, copy,
                                     (jbyte *)(d->out_buffer + d->pending_pos));
         d->pending_pos += copy;
         if (d->pending_pos >= d->pending_bytes) {
             d->pending_pos   = 0;
             d->pending_bytes = 0;
         }
-        return (jint)copy;
+        return (int)copy;
     }
 
     for (;;) {
@@ -2294,14 +2281,14 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
             int copy  = (max_copy < avail) ? max_copy : avail;
             if (copy <= 0) return 0;
 
-            (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+            (*env)->SetByteArrayRegion(jbuf, offset, copy,
                                         (jbyte *)(d->out_buffer + d->pending_pos));
             d->pending_pos += copy;
             if (d->pending_pos >= d->pending_bytes) {
                 d->pending_pos   = 0;
                 d->pending_bytes = 0;
             }
-            return (jint)copy;
+            return (int)copy;
         }
 
         int read_ret = av_read_frame(d->fmt_ctx, d->pkt);
@@ -2323,14 +2310,14 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
                         int avail = d->pending_bytes - d->pending_pos;
                         int copy  = (max_copy < avail) ? max_copy : avail;
                         if (copy > 0) {
-                            (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+                            (*env)->SetByteArrayRegion(jbuf, offset, copy,
                                                         (jbyte *)(d->out_buffer + d->pending_pos));
                             d->pending_pos += copy;
                             if (d->pending_pos >= d->pending_bytes) {
                                 d->pending_pos   = 0;
                                 d->pending_bytes = 0;
                             }
-                            return (jint)copy;
+                            return (int)copy;
                         }
                     }
                     continue;  /* Retry send after draining */
@@ -2344,14 +2331,14 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
                 int avail = d->pending_bytes - d->pending_pos;
                 int copy  = (max_copy < avail) ? max_copy : avail;
                 if (copy > 0) {
-                    (*env)->SetByteArrayRegion(env, jbuf, offset, copy,
+                    (*env)->SetByteArrayRegion(jbuf, offset, copy,
                                                 (jbyte *)(d->out_buffer + d->pending_pos));
                     d->pending_pos += copy;
                     if (d->pending_pos >= d->pending_bytes) {
                         d->pending_pos   = 0;
                         d->pending_bytes = 0;
                     }
-                    return (jint)copy;
+                    return (int)copy;
                 }
             }
             continue;
@@ -2368,7 +2355,7 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int(int64_t handle)
+int am_audio_sample_rate(int64_t handle)
 {
     (void)handle;
     return AUDIO_OUT_SAMPLE_RATE;
@@ -2378,7 +2365,7 @@ int(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int(int64_t handle)
+int am_audio_channels(int64_t handle)
 {
     (void)handle;
     return AUDIO_OUT_CHANNELS;
@@ -2388,7 +2375,7 @@ int(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_rewind(int64_t handle)
+void am_audio_rewind(int64_t handle)
 {
     ad_rewind((AudioDecoder *)(intptr_t)handle);
 }
@@ -2409,20 +2396,20 @@ int am_audio_seek_ms(int64_t handle, int64_t target_ms)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int64_t(int64_t handle)
+int64_t am_audio_get_duration_ms(int64_t handle)
 {
     AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
     if (!d || !d->fmt_ctx) return -1;
     int64_t dur = d->fmt_ctx->duration;
     if (dur <= 0 || dur == AV_NOPTS_VALUE) return -1;
-    return (jlong)(dur / 1000);
+    return (int64_t)(dur / 1000);
 }
 
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_close(int64_t handle)
+void am_audio_close(int64_t handle)
 {
     ad_free((AudioDecoder *)(intptr_t)handle);
 }
