@@ -43,13 +43,11 @@ extern "C" {
 /* ---------------------------------------------------------------
  *  Log callback
  * --------------------------------------------------------------- */
-typedef void (*am_log_callback)(int level, const char *msg, void *userdata);
-
 /* ---------------------------------------------------------------
  *  Lifecycle
  * --------------------------------------------------------------- */
 
-AM_API void am_init(am_log_callback log_cb, void *userdata);
+AM_API void am_init(void);
 AM_API const char *am_last_error(void);
 
 /* ---------------------------------------------------------------

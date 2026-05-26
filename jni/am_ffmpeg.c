@@ -1766,9 +1766,9 @@ uint64_t am_video_open(const char* jpath, int tw, int th, double max_fps, int tm
  * Bit layout: [decoder_ptr (48 bits)] | [pool_index (16 bits)]
  * 0 on EOF or no frame available.
  */
-uint64_t am_video_read_frame(int64_t handle)
+uint64_t am_video_read_frame(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) return 0;
 
     int idx = vd_read_frame_pool_idx(d);
@@ -1788,9 +1788,9 @@ uint64_t am_video_read_frame(int64_t handle)
  * FFM API
  * Signature: (J[J)I  — info[4] = {width, height, ptsMs, durationMs}
  */
-int am_video_frame_get_info(int64_t frame_handle, int64_t* jinfo)
+int am_video_frame_get_info(uint64_t frame, int64_t* jinfo)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
 
@@ -1805,7 +1805,7 @@ int am_video_frame_get_info(int64_t frame_handle, int64_t* jinfo)
     info[1] = (int64_t)vf->height;
     info[2] = (int64_t)vf->pts_ms;
     info[3] = (int64_t)vf->duration_ms;
-    (*env)->SetLongArrayRegion(jinfo, 0, 4, info);
+    jinfo[0] = info[0]; jinfo[1] = info[1]; jinfo[2] = info[2]; jinfo[3] = info[3];
     int out = (int)(vf->width * vf->height * 4);
     decoder_registry_release(d);
     return out;
@@ -1815,9 +1815,9 @@ int am_video_frame_get_info(int64_t frame_handle, int64_t* jinfo)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void* am_video_frame_get_pixels(int64_t frame_handle)
+void* am_video_frame_get_pixels(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
 
@@ -1826,7 +1826,7 @@ void* am_video_frame_get_pixels(int64_t frame_handle)
         decoder_registry_release(d);
         return NULL;
     }
-    jobject out = vf->rgba_datavf->capacity);
+    vf->rgba_data;
     decoder_registry_release(d);
     return out;
 }
@@ -1835,9 +1835,9 @@ void* am_video_frame_get_pixels(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_get_pixel_format(int64_t frame_handle)
+int am_video_frame_get_pixel_format(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1854,9 +1854,9 @@ int am_video_frame_get_pixel_format(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_is_gpu(int64_t frame_handle)
+int am_video_frame_is_gpu(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1873,9 +1873,9 @@ int am_video_frame_is_gpu(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_get_gpu_backend(int64_t frame_handle)
+int am_video_frame_get_gpu_backend(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1892,9 +1892,9 @@ int am_video_frame_get_gpu_backend(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t am_video_frame_get_gpu_handle(int64_t frame_handle)
+uint64_t am_video_frame_get_gpu_handle(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1911,9 +1911,9 @@ uint64_t am_video_frame_get_gpu_handle(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_get_gpu_subresource(int64_t frame_handle)
+int am_video_frame_get_gpu_subresource(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1931,9 +1931,9 @@ int am_video_frame_get_gpu_subresource(int64_t frame_handle)
  * FFM API
  * Signature: (J[I)I  info[2] = {surfaceWidth, surfaceHeight}
  */
-int am_video_frame_get_gpu_surface_info(int64_t frame_handle, int* jinfo)
+int am_video_frame_get_gpu_surface_info(uint64_t frame, int* jinfo)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1944,7 +1944,7 @@ int am_video_frame_get_gpu_surface_info(int64_t frame_handle, int* jinfo)
     int out_info[2];
     out_info[0] = (int)(vf->gpu_surface_width > 0 ? vf->gpu_surface_width : vf->width);
     out_info[1] = (int)(vf->gpu_surface_height > 0 ? vf->gpu_surface_height : vf->height);
-    (*env)->SetIntArrayRegion(jinfo, 0, 2, out_info);
+    
     decoder_registry_release(d);
     return 1;
 }
@@ -1953,9 +1953,9 @@ int am_video_frame_get_gpu_surface_info(int64_t frame_handle, int* jinfo)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_frame_get_plane_count(int64_t frame_handle)
+int am_video_frame_get_plane_count(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1973,9 +1973,9 @@ int am_video_frame_get_plane_count(int64_t frame_handle)
  * FFM API
  * Signature: (JI[I)I info[3] = {rowStride, pixelStride, planeBytes}
  */
-int am_video_frame_get_plane_info(int64_t frame_handle, int plane_index, int* jinfo)
+int am_video_frame_get_plane_info(uint64_t frame, int plane_index, int* jinfo)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -1993,7 +1993,7 @@ int am_video_frame_get_plane_info(int64_t frame_handle, int plane_index, int* ji
     info[0] = (int)vf->plane_linesize[plane];
     info[1] = (int)vf->plane_pixel_stride[plane];
     info[2] = (int)vf->plane_size[plane];
-    (*env)->SetIntArrayRegion(jinfo, 0, 3, info);
+    
     int out = (int)vf->plane_size[plane];
     decoder_registry_release(d);
     return out;
@@ -2003,9 +2003,9 @@ int am_video_frame_get_plane_info(int64_t frame_handle, int plane_index, int* ji
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void* am_video_frame_get_plane_buffer(int64_t frame_handle, int plane_index)
+void* am_video_frame_get_plane_buffer(uint64_t frame, int plane_index)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -2025,7 +2025,7 @@ void* am_video_frame_get_plane_buffer(int64_t frame_handle, int plane_index)
         decoder_registry_release(d);
         return NULL;
     }
-    jobject out = ptrsize);
+    ptrsize);
     decoder_registry_release(d);
     return out;
 }
@@ -2035,9 +2035,9 @@ void* am_video_frame_get_plane_buffer(int64_t frame_handle, int plane_index)
  * FFM API
  * Signature: (J[I)I info[4] = {colorspace, color_trc, color_primaries, color_range}
  */
-int am_video_frame_get_color_info(int64_t frame_handle, int* jinfo)
+int am_video_frame_get_color_info(uint64_t frame, int* jinfo)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -2050,7 +2050,7 @@ int am_video_frame_get_color_info(int64_t frame_handle, int* jinfo)
     info[1] = (int)vf->color_trc;
     info[2] = (int)vf->color_primaries;
     info[3] = (int)vf->color_range;
-    (*env)->SetIntArrayRegion(jinfo, 0, 4, info);
+    
     decoder_registry_release(d);
     return 1;
 }
@@ -2059,9 +2059,9 @@ int am_video_frame_get_color_info(int64_t frame_handle, int* jinfo)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char* am_video_frame_get_source_pixel_format(int64_t frame_handle)
+const char* am_video_frame_get_source_pixel_format(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     VideoFrame *vf = vd_get_frame(d, idx);
@@ -2071,7 +2071,7 @@ const char* am_video_frame_get_source_pixel_format(int64_t frame_handle)
     }
     const char *name = av_get_pix_fmt_name((enum AVPixelFormat)vf->source_pix_fmt);
     if (!name || !name[0]) name = "unknown";
-    jstring out = name;
+    name;
     decoder_registry_release(d);
     return out;
 }
@@ -2080,9 +2080,9 @@ const char* am_video_frame_get_source_pixel_format(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void am_video_frame_release(int64_t frame_handle)
+void am_video_frame_release(uint64_t frame)
 {
-    uintptr_t packed = (uintptr_t)frame_handle;
+    uintptr_t packed = (uintptr_t)frame;
     VideoDecoder *d = decoder_registry_acquire(packed >> 16);
     int idx = (int)(packed & 0xFFFF);
     if (!d) return;
@@ -2094,9 +2094,9 @@ void am_video_frame_release(int64_t frame_handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void am_video_rewind(int64_t handle)
+void am_video_rewind(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) return;
     vd_rewind(d);
     decoder_registry_release(d);
@@ -2106,9 +2106,9 @@ void am_video_rewind(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_seek_ms(int64_t handle, int64_t target_ms)
+int am_video_seek_ms(uint64_t decoder, int64_t target_ms)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) return 0;
     int ret = vd_seek_ms(d, (int64_t)target_ms);
     decoder_registry_release(d);
@@ -2119,9 +2119,9 @@ int am_video_seek_ms(int64_t handle, int64_t target_ms)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int64_t am_video_get_duration_ms(int64_t handle)
+uint64_t am_video_get_duration_ms(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d || !d->fmt_ctx) {
         decoder_registry_release(d);
         return -1;
@@ -2140,9 +2140,9 @@ int64_t am_video_get_duration_ms(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_video_is_hardware_decode(int64_t handle)
+int am_video_is_hardware_decode(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) {
         decoder_registry_release(d);
         return 0;
@@ -2156,15 +2156,15 @@ int am_video_is_hardware_decode(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char* am_video_get_hardware_backend(int64_t handle)
+const char* am_video_get_hardware_backend(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) {
         decoder_registry_release(d);
         return "unknown";
     }
     const char *name = (d->hw_backend_name[0] != '\0') ? d->hw_backend_name : "none";
-    jstring out = name;
+    name;
     decoder_registry_release(d);
     return out;
 }
@@ -2173,15 +2173,15 @@ const char* am_video_get_hardware_backend(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-const char* am_video_get_hardware_probe_message(int64_t handle)
+const char* am_video_get_hardware_probe_message(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) {
         decoder_registry_release(d);
         return "";
     }
     const char *msg = d->hw_probe_detail[0] ? d->hw_probe_detail : "";
-    jstring out = msg;
+    msg;
     decoder_registry_release(d);
     return out;
 }
@@ -2190,9 +2190,9 @@ const char* am_video_get_hardware_probe_message(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t am_video_get_hardware_device_handle(int64_t handle)
+uint64_t am_video_get_hardware_device_handle(uint64_t decoder)
 {
-    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)handle);
+    VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d) {
         decoder_registry_release(d);
         return 0;
@@ -2206,9 +2206,9 @@ uint64_t am_video_get_hardware_device_handle(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void am_video_close(int64_t handle)
+void am_video_close(uint64_t decoder)
 {
-    VideoDecoder *d = (VideoDecoder *)(intptr_t)handle;
+    VideoDecoder *d = (VideoDecoder *)(intptr_t)decoder;
     if (!d) return;
     if (!decoder_registry_remove(d)) {
         return; /* already closed / stale handle */
@@ -2251,16 +2251,16 @@ uint64_t am_audio_open(const char* jpath, int tmo, int buf_kb, int recon)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
+int am_audio_read_pcm(uint64_t decoder, uint8_t* jbuf, int offset, int length)
 {
-    AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
+    AudioDecoder *d = (AudioDecoder *)(intptr_t)decoder;
     if (!d || !jbuf || length <= 0) return -2;
+    int max_copy = length;
     /* Serve from pending */
     if (d->pending_bytes > d->pending_pos) {
         int avail = d->pending_bytes - d->pending_pos;
         int copy  = (max_copy < avail) ? max_copy : avail;
-        (*env)->SetByteArrayRegion(jbuf, offset, copy,
-                                    (jbyte *)(d->out_buffer + d->pending_pos));
+        memcpy(jbuf + offset, d->out_buffer + d->pending_pos, copy);
         d->pending_pos += copy;
         if (d->pending_pos >= d->pending_bytes) {
             d->pending_pos   = 0;
@@ -2281,8 +2281,7 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
             int copy  = (max_copy < avail) ? max_copy : avail;
             if (copy <= 0) return 0;
 
-            (*env)->SetByteArrayRegion(jbuf, offset, copy,
-                                        (jbyte *)(d->out_buffer + d->pending_pos));
+            memcpy(jbuf + offset, d->out_buffer + d->pending_pos, copy);
             d->pending_pos += copy;
             if (d->pending_pos >= d->pending_bytes) {
                 d->pending_pos   = 0;
@@ -2310,8 +2309,7 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
                         int avail = d->pending_bytes - d->pending_pos;
                         int copy  = (max_copy < avail) ? max_copy : avail;
                         if (copy > 0) {
-                            (*env)->SetByteArrayRegion(jbuf, offset, copy,
-                                                        (jbyte *)(d->out_buffer + d->pending_pos));
+                            memcpy(jbuf + offset, d->out_buffer + d->pending_pos, copy);
                             d->pending_pos += copy;
                             if (d->pending_pos >= d->pending_bytes) {
                                 d->pending_pos   = 0;
@@ -2331,8 +2329,7 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
                 int avail = d->pending_bytes - d->pending_pos;
                 int copy  = (max_copy < avail) ? max_copy : avail;
                 if (copy > 0) {
-                    (*env)->SetByteArrayRegion(jbuf, offset, copy,
-                                                (jbyte *)(d->out_buffer + d->pending_pos));
+                    memcpy(jbuf + offset, d->out_buffer + d->pending_pos, copy);
                     d->pending_pos += copy;
                     if (d->pending_pos >= d->pending_bytes) {
                         d->pending_pos   = 0;
@@ -2355,9 +2352,9 @@ int am_audio_read_pcm(int64_t handle, uint8_t* jbuf, int offset, int length)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_sample_rate(int64_t handle)
+int am_audio_sample_rate(uint64_t decoder)
 {
-    (void)handle;
+    (void)decoder;
     return AUDIO_OUT_SAMPLE_RATE;
 }
 
@@ -2365,9 +2362,9 @@ int am_audio_sample_rate(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_channels(int64_t handle)
+int am_audio_channels(uint64_t decoder)
 {
-    (void)handle;
+    (void)decoder;
     return AUDIO_OUT_CHANNELS;
 }
 
@@ -2375,18 +2372,18 @@ int am_audio_channels(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void am_audio_rewind(int64_t handle)
+void am_audio_rewind(uint64_t decoder)
 {
-    ad_rewind((AudioDecoder *)(intptr_t)handle);
+    ad_rewind((AudioDecoder *)(intptr_t)decoder);
 }
 
 /*
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int am_audio_seek_ms(int64_t handle, int64_t target_ms)
+int am_audio_seek_ms(uint64_t decoder, int64_t target_ms)
 {
-    AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
+    AudioDecoder *d = (AudioDecoder *)(intptr_t)decoder;
     if (!d) return 0;
     int ret = ad_seek_ms(d, (int64_t)target_ms);
     return ret >= 0 ? 1 : 0;
@@ -2396,9 +2393,9 @@ int am_audio_seek_ms(int64_t handle, int64_t target_ms)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-int64_t am_audio_get_duration_ms(int64_t handle)
+int64_t am_audio_get_duration_ms(uint64_t decoder)
 {
-    AudioDecoder *d = (AudioDecoder *)(intptr_t)handle;
+    AudioDecoder *d = (AudioDecoder *)(intptr_t)decoder;
     if (!d || !d->fmt_ctx) return -1;
     int64_t dur = d->fmt_ctx->duration;
     if (dur <= 0 || dur == AV_NOPTS_VALUE) return -1;
@@ -2409,9 +2406,9 @@ int64_t am_audio_get_duration_ms(int64_t handle)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-void am_audio_close(int64_t handle)
+void am_audio_close(uint64_t decoder)
 {
-    ad_free((AudioDecoder *)(intptr_t)handle);
+    ad_free((AudioDecoder *)(intptr_t)decoder);
 }
 
 #if defined(_WIN32)
