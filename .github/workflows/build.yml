@@ -218,18 +218,15 @@ jobs:
           ./build-minimal.sh build-ffmapi
 
       - name: Generate Java FFM API bindings via jextract
-        if: matrix.platform == 'linux-x64'  # run once on Linux
+        if: matrix.platform == 'linux-x64'  # one platform is enough (Java sources are portable)
         shell: bash
         run: |
-          # jextract ships with JDK 25 in $JAVA_HOME/bin
-          JEXTRACT="$JAVA_HOME/bin/jextract"
-          if [ ! -f "$JEXTRACT" ]; then
-            echo "jextract not bundled, downloading..."
-            curl -sL -o /tmp/jextract.tar.gz \
-              "https://github.com/openjdk/jextract/releases/latest/download/jextract-25-linux.tar.gz"
-            tar xzf /tmp/jextract.tar.gz -C /tmp
-            JEXTRACT="/tmp/jextract-25/bin/jextract"
-          fi
+          echo "Downloading jextract..."
+          curl -sL -o /tmp/jextract.tar.gz \
+            "https://download.java.net/java/early_access/jextract/25/2/openjdk-25-jextract+2-4_linux-x64_bin.tar.gz"
+          tar xzf /tmp/jextract.tar.gz -C /tmp
+          JEXTRACT=$(ls /tmp/jextract-*/bin/jextract 2>/dev/null | head -1)
+          if [ -z "$JEXTRACT" ]; then echo "jextract binary not found"; exit 1; fi
           mkdir -p jni/jextract-gen
           "$JEXTRACT" \
             --output jni/jextract-gen \
