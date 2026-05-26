@@ -29,13 +29,13 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ---- Platform definitions ----
-# FfBase = FFmpeg shared lib names (without extension)
+# FfBase = FFmpeg shared lib names (without version extension — like macOS)
 # FfInBin = $true -> look in bin/; $false -> look in lib/
 $platformDefs = @(
     [pscustomobject]@{ Name = "windows-x64";  Ext = "dll";   JniName = "apricitymedia-jni";     FfBase = @("avcodec-62","avformat-62","avutil-60","swresample-6","swscale-9");     FfInBin = $true;  RuntimeBase = @("apwinpthread_01","libdav1d-*") }
     [pscustomobject]@{ Name = "macos-arm64";  Ext = "dylib"; JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.62","libavformat.62","libavutil.60","libswresample.6","libswscale.9"); FfInBin = $false }
-    [pscustomobject]@{ Name = "linux-x64";    Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.so.62","libavformat.so.62","libavutil.so.60","libswresample.so.6","libswscale.so.9"); FfInBin = $false }
-    [pscustomobject]@{ Name = "android-arm64";Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.so.62","libavformat.so.62","libavutil.so.60","libswresample.so.6","libswscale.so.9"); FfInBin = $false }
+    [pscustomobject]@{ Name = "linux-x64";    Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.62","libavformat.62","libavutil.60","libswresample.6","libswscale.9"); FfInBin = $false; FfVerPrefix = $true }
+    [pscustomobject]@{ Name = "android-arm64";Ext = "so";    JniName = "libapricitymedia-jni";  FfBase = @("libavcodec.62","libavformat.62","libavutil.60","libswresample.6","libswscale.9"); FfInBin = $false; FfVerPrefix = $true }
 )
 
 # ---- Java -> Minecraft version mapping ----
@@ -119,7 +119,21 @@ foreach ($p in $platformDefs) {
 
                 # ---- FFmpeg shared libraries ----
                 foreach ($base in $p.FfBase) {
-                    $src = Join-Path $ffDir "$base.$($p.Ext)"
+                    # Linux/Android: libavcodec.62 → libavcodec.so.62 (Ext before version)
+                    # macOS:         libavcodec.62 → libavcodec.62.dylib (Ext after version)
+                    # Windows:       avcodec-62     → avcodec-62.dll       (Ext at end)
+                    if ($p.FfVerPrefix) {
+                        $dot = $base.LastIndexOf('.')
+                        if ($dot -gt 0) {
+                            $name = $base.Substring(0, $dot)
+                            $ver  = $base.Substring($dot + 1)
+                            $src  = Join-Path $ffDir "$name.$($p.Ext).$ver"
+                        } else {
+                            $src = Join-Path $ffDir "$base.$($p.Ext)"
+                        }
+                    } else {
+                        $src = Join-Path $ffDir "$base.$($p.Ext)"
+                    }
                     if (Test-Path $src) {
                         Copy-Item -Path $src -Destination $stage
                     } else {
