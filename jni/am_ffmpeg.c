@@ -1826,7 +1826,7 @@ void* am_video_frame_get_pixels(uint64_t frame)
         decoder_registry_release(d);
         return NULL;
     }
-    vf->rgba_data;
+    void *out = vf->rgba_data;
     decoder_registry_release(d);
     return out;
 }
@@ -1944,7 +1944,7 @@ int am_video_frame_get_gpu_surface_info(uint64_t frame, int* jinfo)
     int out_info[2];
     out_info[0] = (int)(vf->gpu_surface_width > 0 ? vf->gpu_surface_width : vf->width);
     out_info[1] = (int)(vf->gpu_surface_height > 0 ? vf->gpu_surface_height : vf->height);
-    
+    jinfo[0] = out_info[0]; jinfo[1] = out_info[1];
     decoder_registry_release(d);
     return 1;
 }
@@ -1993,7 +1993,7 @@ int am_video_frame_get_plane_info(uint64_t frame, int plane_index, int* jinfo)
     info[0] = (int)vf->plane_linesize[plane];
     info[1] = (int)vf->plane_pixel_stride[plane];
     info[2] = (int)vf->plane_size[plane];
-    
+    jinfo[0] = info[0]; jinfo[1] = info[1]; jinfo[2] = info[2];
     int out = (int)vf->plane_size[plane];
     decoder_registry_release(d);
     return out;
@@ -2025,7 +2025,7 @@ void* am_video_frame_get_plane_buffer(uint64_t frame, int plane_index)
         decoder_registry_release(d);
         return NULL;
     }
-    ptrsize);
+    void *out = ptr;
     decoder_registry_release(d);
     return out;
 }
@@ -2050,7 +2050,7 @@ int am_video_frame_get_color_info(uint64_t frame, int* jinfo)
     info[1] = (int)vf->color_trc;
     info[2] = (int)vf->color_primaries;
     info[3] = (int)vf->color_range;
-    
+    jinfo[0] = info[0]; jinfo[1] = info[1]; jinfo[2] = info[2]; jinfo[3] = info[3];
     decoder_registry_release(d);
     return 1;
 }
@@ -2071,7 +2071,7 @@ const char* am_video_frame_get_source_pixel_format(uint64_t frame)
     }
     const char *name = av_get_pix_fmt_name((enum AVPixelFormat)vf->source_pix_fmt);
     if (!name || !name[0]) name = "unknown";
-    name;
+    const char *out = name;
     decoder_registry_release(d);
     return out;
 }
@@ -2119,7 +2119,7 @@ int am_video_seek_ms(uint64_t decoder, int64_t target_ms)
  * Class:     cc_sighs_apricitymedia_jni_ApricityMediaNative
  * FFM API
  */
-uint64_t am_video_get_duration_ms(uint64_t decoder)
+int64_t am_video_get_duration_ms(uint64_t decoder)
 {
     VideoDecoder *d = decoder_registry_acquire((uintptr_t)(intptr_t)decoder);
     if (!d || !d->fmt_ctx) {
@@ -2164,7 +2164,7 @@ const char* am_video_get_hardware_backend(uint64_t decoder)
         return "unknown";
     }
     const char *name = (d->hw_backend_name[0] != '\0') ? d->hw_backend_name : "none";
-    name;
+    const char *out = name;
     decoder_registry_release(d);
     return out;
 }
@@ -2181,7 +2181,7 @@ const char* am_video_get_hardware_probe_message(uint64_t decoder)
         return "";
     }
     const char *msg = d->hw_probe_detail[0] ? d->hw_probe_detail : "";
-    msg;
+    const char *out = msg;
     decoder_registry_release(d);
     return out;
 }
